@@ -298,14 +298,14 @@
           "description": "Eseguire backup regolari dello stato del sistema (System State Backup) su tutti i DC. Testare il ripristino almeno annualmente in ambiente isolato. Documentare il processo di disaster recovery.",
           "severity": "high",
           "ref": "Best practice Microsoft AD"
-        }
+        },
         {
-  "id": "ia-866",
-  "title": "Trovare tutti gli oggetti privilegiati",
-  "description": "Verificare quali sono i Gruppi privilegiati e chi ne fà parte.\nCreare una ricerca custom LDAP\n(&(groupType:1.2.840.113556.1.4.803:= 2147483648)(admincount=1))\n\nOppure via PowerShell\nGet-ADObject -LDAPfilter “(&(groupType: 1.2.840.113556.1.4.803:=2147483648) (admincount=1))”",
-  "severity": "high",
-  "ref": ""
-}
+        "id": "ia-866",
+        "title": "Trovare tutti gli oggetti privilegiati",
+        "description": "Verificare quali sono i Gruppi privilegiati e chi ne fà parte.\nCreare una ricerca custom LDAP\n(&(groupType:1.2.840.113556.1.4.803:= 2147483648)(admincount=1))\n\nOppure via PowerShell\nGet-ADObject -LDAPfilter “(&(groupType: 1.2.840.113556.1.4.803:=2147483648) (admincount=1))”",
+        "severity": "high",
+        "ref": ""
+        }
       ]
     }
   ]
