@@ -41,21 +41,24 @@
     .container {
       max-width: 820px;
       margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      align-items: start;
     }
 
-    /* HEADER */
+    .col-full { grid-column: 1 / -1; }
+
     .page-header {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
-      margin-bottom: 36px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid var(--border);
+      margin-bottom: 6px;
     }
 
     .page-header h1 {
       font-family: var(--sans);
-      font-size: 28px;
+      font-size: 26px;
       font-weight: 800;
       color: #fff;
       letter-spacing: -.02em;
@@ -74,243 +77,166 @@
     }
     .back-link:hover { color: var(--accent); border-color: var(--accent-dim); }
 
-    /* API KEY */
-    .api-section {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 16px 20px;
-      margin-bottom: 24px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .api-section label {
+    .page-sub {
       font-size: 12px;
       color: var(--text-muted);
-      white-space: nowrap;
+      margin-bottom: 32px;
     }
 
-    .api-section input {
-      flex: 1;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      font-family: var(--mono);
-      font-size: 13px;
-      padding: 7px 12px;
-      border-radius: var(--radius);
-      outline: none;
-      transition: border-color .15s;
-    }
-    .api-section input:focus { border-color: var(--accent-dim); }
-    .api-section input::placeholder { color: var(--text-muted); }
-
-    .api-hint {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 6px;
-      margin-bottom: 24px;
-    }
-    .api-hint a { color: var(--accent-dim); }
-
-    /* FORM */
-    .form-group {
-      margin-bottom: 20px;
-    }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
 
     .form-label {
-      display: block;
-      font-size: 11px;
-      letter-spacing: .1em;
+      font-size: 10px;
+      letter-spacing: .12em;
       text-transform: uppercase;
       color: var(--text-muted);
-      margin-bottom: 8px;
     }
 
-    textarea {
-      width: 100%;
+    .form-label .req { color: var(--accent); margin-left: 2px; }
+
+    input[type="text"],
+    textarea,
+    select {
       background: var(--surface);
       border: 1px solid var(--border);
       color: var(--text);
       font-family: var(--mono);
       font-size: 13px;
-      padding: 14px 16px;
+      padding: 9px 13px;
       border-radius: var(--radius);
-      resize: vertical;
-      min-height: 160px;
       outline: none;
-      line-height: 1.7;
       transition: border-color .15s;
+      width: 100%;
     }
-    textarea:focus { border-color: var(--accent-dim); }
+
+    input[type="text"]:focus,
+    textarea:focus,
+    select:focus { border-color: var(--accent-dim); }
+
+    input::placeholder,
     textarea::placeholder { color: var(--text-muted); }
 
-    .cat-select {
-      width: 100%;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      color: var(--text);
-      font-family: var(--mono);
-      font-size: 13px;
-      padding: 9px 12px;
-      border-radius: var(--radius);
-      outline: none;
-      cursor: pointer;
-      transition: border-color .15s;
-    }
-    .cat-select:focus { border-color: var(--accent-dim); }
+    textarea { resize: vertical; min-height: 90px; line-height: 1.6; }
+    select { cursor: pointer; }
 
-    .btn-generate {
-      width: 100%;
+    /* SEVERITÀ */
+    .severity-group {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+
+    .sev-radio { display: none; }
+
+    .sev-label {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 4px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      cursor: pointer;
+      color: var(--text-muted);
+      transition: all .15s;
+    }
+
+    #sev-critical:checked + .sev-label { background: var(--critical); border-color: var(--critical); color: #000; }
+    #sev-high:checked     + .sev-label { background: var(--high);     border-color: var(--high);     color: #000; }
+    #sev-medium:checked   + .sev-label { background: var(--medium);   border-color: var(--medium);   color: #000; }
+    #sev-low:checked      + .sev-label { background: var(--low);      border-color: var(--low);      color: #000; }
+
+    /* BOTTONI */
+    .btn-row { display: flex; gap: 10px; }
+
+    .btn-primary {
+      flex: 1;
       background: var(--accent);
       border: none;
       color: #000;
       font-family: var(--sans);
       font-weight: 700;
       font-size: 14px;
-      padding: 13px;
+      padding: 12px;
       border-radius: var(--radius);
       cursor: pointer;
-      letter-spacing: .04em;
       transition: opacity .15s;
-      margin-top: 4px;
     }
-    .btn-generate:hover { opacity: .88; }
-    .btn-generate:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-primary:hover { opacity: .88; }
 
-    /* SPINNER */
-    .spinner {
-      display: none;
-      text-align: center;
-      padding: 32px;
+    .btn-secondary {
+      background: var(--surface);
+      border: 1px solid var(--border);
       color: var(--text-muted);
+      font-family: var(--mono);
       font-size: 13px;
+      padding: 12px 18px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: all .15s;
     }
-    .spinner.active { display: block; }
-    .spinner::before {
-      content: '';
-      display: block;
-      width: 28px; height: 28px;
-      border: 2px solid var(--border);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      margin: 0 auto 12px;
-      animation: spin .7s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    .btn-secondary:hover { border-color: var(--accent-dim); color: var(--accent); }
 
-    /* RISULTATO */
-    .result-section {
+    /* ERRORI */
+    .err { font-size: 11px; color: var(--critical); display: none; }
+    .err.show { display: block; }
+
+    /* PREVIEW */
+    .preview-panel,
+    .output-panel,
+    .instructions {
       display: none;
-      margin-top: 28px;
     }
-    .result-section.active { display: block; }
+    .preview-panel.show,
+    .output-panel.show,
+    .instructions.show { display: block; }
 
-    .result-header {
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .panel-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 10px;
+      padding: 11px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface2);
     }
 
-    .result-title {
-      font-size: 11px;
-      letter-spacing: .1em;
+    .panel-title {
+      font-size: 10px;
+      letter-spacing: .12em;
       text-transform: uppercase;
       color: var(--text-muted);
     }
 
     .btn-copy {
-      background: var(--surface2);
+      background: none;
       border: 1px solid var(--border);
       color: var(--text-muted);
       font-family: var(--mono);
-      font-size: 12px;
-      padding: 5px 12px;
+      font-size: 11px;
+      padding: 4px 10px;
       border-radius: var(--radius);
       cursor: pointer;
       transition: all .15s;
     }
-    .btn-copy:hover { border-color: var(--accent-dim); color: var(--accent); }
+    .btn-copy:hover  { border-color: var(--accent-dim); color: var(--accent); }
     .btn-copy.copied { border-color: var(--accent); color: var(--accent); }
 
-    .result-box {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 20px;
-      overflow-x: auto;
-    }
+    .panel-body { padding: 16px; }
 
-    .result-box pre {
-      font-family: var(--mono);
-      font-size: 12.5px;
-      line-height: 1.7;
-      color: var(--text);
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    /* ISTRUZIONI */
-    .instructions {
-      margin-top: 28px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-left: 3px solid var(--accent-dim);
-      border-radius: var(--radius);
-      padding: 16px 20px;
-    }
-
-    .instructions p {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-    }
-    .instructions p:last-child { margin-bottom: 0; }
-    .instructions strong { color: var(--text); }
-
-    /* ERRORE */
-    .error-box {
-      display: none;
-      margin-top: 20px;
-      background: rgba(255,77,77,.08);
-      border: 1px solid rgba(255,77,77,.3);
-      border-radius: var(--radius);
-      padding: 14px 18px;
-      font-size: 13px;
-      color: var(--critical);
-    }
-    .error-box.active { display: block; }
-
-    /* PREVIEW CARD */
-    .preview-card {
-      margin-top: 20px;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 16px;
-    }
-
-    .preview-title {
-      font-size: 11px;
-      letter-spacing: .1em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-      margin-bottom: 12px;
-    }
-
-    .preview-item {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 12px 16px;
-    }
-
-    .preview-item-title { font-size: 13px; color: var(--text); margin-bottom: 6px; }
-    .preview-item-desc  { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
-    .preview-meta       { display: flex; gap: 8px; align-items: center; }
+    /* Preview card */
+    .prev-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+    .prev-desc  { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.6; }
+    .prev-meta  { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
     .badge {
       font-size: 10px;
@@ -320,48 +246,74 @@
       text-transform: uppercase;
       letter-spacing: .06em;
     }
-    .badge-critical { background: rgba(255,77,77,.15); color: var(--critical); }
+    .badge-critical { background: rgba(255,77,77,.15);  color: var(--critical); }
     .badge-high     { background: rgba(255,140,66,.15); color: var(--high); }
     .badge-medium   { background: rgba(245,197,24,.15); color: var(--medium); }
     .badge-low      { background: rgba(76,175,80,.15);  color: var(--low); }
 
-    .preview-cat { font-size: 11px; color: var(--text-muted); }
-    .preview-ref { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+    .prev-cat { font-size: 11px; color: var(--text-muted); }
+    .prev-ref { font-size: 11px; color: var(--text-muted); margin-left: auto; font-style: italic; }
+
+    /* JSON output */
+    .panel-body pre {
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.75;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* Istruzioni */
+    .instructions {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent-dim);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+    }
+
+    .instructions p {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .instructions p:last-child { margin-bottom: 0; }
+    .instructions strong { color: var(--text); }
+    .instructions code {
+      background: var(--surface2);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+
+    @media (max-width: 600px) {
+      .container { grid-template-columns: 1fr; }
+      .col-full  { grid-column: 1; }
+    }
   </style>
 </head>
 <body>
 <div class="container">
 
-  <div class="page-header">
-    <h1>Admin <span>→</span> Aggiungi controllo</h1>
-    <a href="index.html" class="back-link">← Torna al sito</a>
+  <div class="col-full page-header">
+    <h1>Admin <span>→</span> Nuovo controllo</h1>
+    <a href="index.html" class="back-link">← Checklist</a>
+  </div>
+  <p class="col-full page-sub">Compila il form e ottieni il JSON pronto da incollare in <code>data/checklist.json</code></p>
+
+  <!-- TITOLO -->
+  <div class="form-group col-full">
+    <label class="form-label">Titolo <span class="req">*</span></label>
+    <input type="text" id="f-title" placeholder="Es: Disabilitare SMBv1 su tutti i sistemi" maxlength="100" />
+    <span class="err" id="err-title">Campo obbligatorio</span>
   </div>
 
-  <!-- API KEY -->
-  <div class="api-section">
-    <label>API Key Anthropic</label>
-    <input type="password" id="api-key" placeholder="sk-ant-..." autocomplete="off" />
-  </div>
-  <p class="api-hint">
-    La chiave è usata solo nel browser, non viene salvata né inviata altrove.
-    Ottienila su <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a>.
-  </p>
-
-  <!-- FORM -->
+  <!-- CATEGORIA -->
   <div class="form-group">
-    <label class="form-label">Nota grezza</label>
-    <textarea id="raw-note" placeholder="Incolla qui la tua nota, appunto, comando PowerShell, link, testo libero...
-
-Esempio:
-Abilitare SMB signing sui DC altrimenti sei esposto a relay attacks. 
-Comando: Set-SmbServerConfiguration -RequireSecuritySignature $true
-Ref: CIS Windows L1 2.3.9.2"></textarea>
-  </div>
-
-  <div class="form-group">
-    <label class="form-label">Categoria (opzionale — se non indicata Claude la suggerisce)</label>
-    <select class="cat-select" id="cat-select">
-      <option value="">— Lascia decidere a Claude —</option>
+    <label class="form-label">Categoria <span class="req">*</span></label>
+    <select id="f-category">
+      <option value="">— Seleziona —</option>
       <option value="identity-access">Identity & Access</option>
       <option value="password-auth">Password & Authentication Policy</option>
       <option value="kerberos">Kerberos & protocolli di autenticazione</option>
@@ -370,53 +322,99 @@ Ref: CIS Windows L1 2.3.9.2"></textarea>
       <option value="services-config">Servizi & configurazione</option>
       <option value="patching">Patching & lifecycle</option>
     </select>
+    <span class="err" id="err-cat">Campo obbligatorio</span>
   </div>
 
-  <button class="btn-generate" id="btn-generate">⚡ Genera JSON</button>
+  <!-- RIFERIMENTO -->
+  <div class="form-group">
+    <label class="form-label">Riferimento</label>
+    <input type="text" id="f-ref" placeholder="Es: CIS AD L1 – 3.1, CVE-2021-1675…" />
+  </div>
 
-  <div class="spinner" id="spinner">Analisi in corso…</div>
-  <div class="error-box" id="error-box"></div>
+  <!-- DESCRIZIONE -->
+  <div class="form-group col-full">
+    <label class="form-label">Descrizione <span class="req">*</span></label>
+    <textarea id="f-desc" placeholder="Contesto del controllo, rischio se non applicato, indicazione operativa…"></textarea>
+    <span class="err" id="err-desc">Campo obbligatorio</span>
+  </div>
 
-  <!-- RISULTATO -->
-  <div class="result-section" id="result-section">
+  <!-- SEVERITÀ -->
+  <div class="form-group col-full">
+    <label class="form-label">Severità <span class="req">*</span></label>
+    <div class="severity-group">
+      <input type="radio" name="severity" id="sev-critical" class="sev-radio" value="critical" />
+      <label class="sev-label" for="sev-critical">🔴 Critico</label>
 
-    <div class="preview-card" id="preview-card">
-      <div class="preview-title">Anteprima controllo</div>
-      <div class="preview-item">
-        <div class="preview-item-title" id="prev-title">—</div>
-        <div class="preview-item-desc"  id="prev-desc">—</div>
-        <div class="preview-meta">
-          <span class="badge" id="prev-badge">—</span>
-          <span class="preview-cat" id="prev-cat">—</span>
-          <span class="preview-ref" id="prev-ref"></span>
+      <input type="radio" name="severity" id="sev-high" class="sev-radio" value="high" />
+      <label class="sev-label" for="sev-high">🟠 Alto</label>
+
+      <input type="radio" name="severity" id="sev-medium" class="sev-radio" value="medium" />
+      <label class="sev-label" for="sev-medium">🟡 Medio</label>
+
+      <input type="radio" name="severity" id="sev-low" class="sev-radio" value="low" />
+      <label class="sev-label" for="sev-low">🟢 Basso</label>
+    </div>
+    <span class="err" id="err-sev">Seleziona una severità</span>
+  </div>
+
+  <!-- BOTTONI -->
+  <div class="col-full btn-row">
+    <button class="btn-primary" id="btn-generate">⚡ Genera JSON</button>
+    <button class="btn-secondary" id="btn-reset">↺ Reset</button>
+  </div>
+
+  <!-- ANTEPRIMA -->
+  <div class="col-full preview-panel" id="preview-panel">
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title">Anteprima controllo</span></div>
+      <div class="panel-body">
+        <div class="prev-title" id="prev-title"></div>
+        <div class="prev-desc"  id="prev-desc"></div>
+        <div class="prev-meta">
+          <span class="badge" id="prev-badge"></span>
+          <span class="prev-cat" id="prev-cat"></span>
+          <span class="prev-ref" id="prev-ref"></span>
         </div>
       </div>
     </div>
+  </div>
 
-    <div style="margin-top:20px">
-      <div class="result-header">
-        <span class="result-title">JSON da aggiungere a checklist.json</span>
+  <!-- OUTPUT JSON -->
+  <div class="col-full output-panel" id="output-panel">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">JSON da aggiungere a checklist.json</span>
         <button class="btn-copy" id="btn-copy">Copia</button>
       </div>
-      <div class="result-box">
-        <pre id="result-pre"></pre>
+      <div class="panel-body">
+        <pre id="output-pre"></pre>
       </div>
     </div>
+  </div>
 
-    <div class="instructions">
-      <p><strong>Come aggiungere il controllo:</strong></p>
-      <p>1. Copia il JSON qui sopra.</p>
-      <p>2. Apri <code>data/checklist.json</code> nel repo GitHub.</p>
-      <p>3. Trova la categoria corrispondente e incolla l'oggetto nell'array <code>"items"</code>, separato da virgola.</p>
-      <p>4. Salva il file — il sito si aggiorna automaticamente.</p>
-    </div>
-
+  <!-- ISTRUZIONI -->
+  <div class="col-full instructions" id="instructions">
+    <p><strong>Come aggiungere il controllo:</strong></p>
+    <p>1. Copia il JSON qui sopra.</p>
+    <p>2. Apri <code>data/checklist.json</code> nel repo GitHub (icona matita in alto a destra).</p>
+    <p>3. Trova la categoria giusta e incolla l'oggetto nell'array <code>"items"</code>, separato da una virgola dall'elemento precedente.</p>
+    <p>4. Clicca <strong>Commit changes</strong> — il sito si aggiorna entro pochi secondi.</p>
   </div>
 
 </div>
 
 <script>
-const CATEGORIES = {
+const CAT_PREFIX = {
+  'identity-access':  'ia',
+  'password-auth':    'pa',
+  'kerberos':         'kb',
+  'group-policy':     'gp',
+  'logging-audit':    'la',
+  'services-config':  'sc',
+  'patching':         'pt'
+};
+
+const CAT_NAMES = {
   'identity-access':  'Identity & Access',
   'password-auth':    'Password & Authentication Policy',
   'kerberos':         'Kerberos & protocolli di autenticazione',
@@ -426,153 +424,89 @@ const CATEGORIES = {
   'patching':         'Patching & lifecycle'
 };
 
-const SEVERITY_LABELS = {
-  critical: 'Critico',
-  high:     'Alto',
-  medium:   'Medio',
-  low:      'Basso'
+const SEV_LABELS = {
+  critical: '🔴 Critico',
+  high:     '🟠 Alto',
+  medium:   '🟡 Medio',
+  low:      '🟢 Basso'
 };
 
-document.getElementById('btn-generate').addEventListener('click', async () => {
-  const apiKey  = document.getElementById('api-key').value.trim();
-  const rawNote = document.getElementById('raw-note').value.trim();
-  const catId   = document.getElementById('cat-select').value;
-
-  const errorBox = document.getElementById('error-box');
-  errorBox.className = 'error-box';
-
-  if (!apiKey) { showError('Inserisci la API key Anthropic.'); return; }
-  if (!rawNote) { showError('Inserisci una nota da analizzare.'); return; }
-
-  setLoading(true);
-  document.getElementById('result-section').className = 'result-section';
-
-  const catHint = catId
-    ? `La categoria assegnata è: "${CATEGORIES[catId]}" (id: "${catId}"). Usa esattamente questo id.`
-    : `Scegli la categoria più appropriata tra: ${Object.entries(CATEGORIES).map(([id,n]) => `"${id}" (${n})`).join(', ')}.`;
-
-  const prompt = `Sei un esperto di sicurezza Active Directory. Analizza la seguente nota grezza e genera un oggetto JSON per una checklist di hardening AD.
-
-NOTA GREZZA:
-"""
-${rawNote}
-"""
-
-${catHint}
-
-Genera un oggetto JSON con questa struttura esatta:
-{
-  "id": "xx-NNN",
-  "title": "Titolo conciso del controllo (max 80 caratteri)",
-  "description": "Descrizione tecnica dettagliata con contesto, rischio se non applicato e indicazione operativa. Almeno 2 frasi.",
-  "severity": "critical|high|medium|low",
-  "ref": "Riferimento standard (CIS, MITRE ATT&CK, CVE, Microsoft, ecc.) oppure stringa vuota",
-  "category_id": "id-categoria"
+function genId(catId) {
+  const prefix = CAT_PREFIX[catId] || 'xx';
+  const num    = String(Date.now()).slice(-3);
+  return `${prefix}-${num}`;
 }
 
-Regole per l'id:
-- Usa il prefisso della categoria (es: "ia" per identity-access, "pa" per password-auth, "kb" per kerberos, "gp" per group-policy, "la" per logging-audit, "sc" per services-config, "pt" per patching)
-- Usa un numero a 3 cifre progressivo (es: "ia-042")
+document.getElementById('btn-generate').addEventListener('click', () => {
+  const title    = document.getElementById('f-title').value.trim();
+  const category = document.getElementById('f-category').value;
+  const desc     = document.getElementById('f-desc').value.trim();
+  const severity = document.querySelector('input[name="severity"]:checked')?.value || '';
+  const ref      = document.getElementById('f-ref').value.trim();
 
-Rispondi SOLO con il JSON, senza testo aggiuntivo, senza backtick, senza markdown.`;
-
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type':         'application/json',
-        'x-api-key':            apiKey,
-        'anthropic-version':    '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model:      'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        messages:   [{ role: 'user', content: prompt }]
-      })
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      showError(`Errore API: ${data.error?.message || res.status}`);
-      setLoading(false);
-      return;
-    }
-
-    const raw = data.content?.find(b => b.type === 'text')?.text?.trim() || '';
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      showError('Il modello non ha restituito JSON valido. Riprova.');
-      console.error('Raw output:', raw);
-      setLoading(false);
-      return;
-    }
-
-    renderResult(parsed);
-
-  } catch (err) {
-    showError('Errore di rete: ' + err.message);
-  }
-
-  setLoading(false);
-});
-
-function renderResult(obj) {
-  // Anteprima
-  document.getElementById('prev-title').textContent = obj.title || '—';
-  document.getElementById('prev-desc').textContent  = obj.description || '—';
-  document.getElementById('prev-ref').textContent   = obj.ref || '';
-
-  const catName = CATEGORIES[obj.category_id] || obj.category_id || '—';
-  document.getElementById('prev-cat').textContent = catName;
-
-  const badge = document.getElementById('prev-badge');
-  badge.textContent  = SEVERITY_LABELS[obj.severity] || obj.severity || '—';
-  badge.className    = `badge badge-${obj.severity || 'low'}`;
-
-  // JSON formattato (senza category_id — è solo per il preview)
-  const forJson = {
-    id:          obj.id,
-    title:       obj.title,
-    description: obj.description,
-    severity:    obj.severity,
-    ref:         obj.ref || ''
+  let valid = true;
+  const validate = (cond, errId) => {
+    document.getElementById(errId).classList.toggle('show', !cond);
+    if (!cond) valid = false;
   };
-  const pretty = JSON.stringify(forJson, null, 2);
-  document.getElementById('result-pre').textContent = pretty;
 
-  document.getElementById('result-section').className = 'result-section active';
+  validate(title,    'err-title');
+  validate(category, 'err-cat');
+  validate(desc,     'err-desc');
+  validate(severity, 'err-sev');
+  if (!valid) return;
+
+  const obj = { id: genId(category), title, description: desc, severity, ref };
+  const pretty = JSON.stringify(obj, null, 2);
+
+  // Anteprima
+  document.getElementById('prev-title').textContent = title;
+  document.getElementById('prev-desc').textContent  = desc;
+  document.getElementById('prev-cat').textContent   = CAT_NAMES[category] || category;
+  document.getElementById('prev-ref').textContent   = ref || '';
+  const badge = document.getElementById('prev-badge');
+  badge.textContent = SEV_LABELS[severity];
+  badge.className   = `badge badge-${severity}`;
+
+  // JSON
+  document.getElementById('output-pre').textContent = pretty;
+
+  // Mostra pannelli
+  document.getElementById('preview-panel').classList.add('show');
+  document.getElementById('output-panel').classList.add('show');
+  document.getElementById('instructions').classList.add('show');
+  document.getElementById('preview-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   // Copia
   const btnCopy = document.getElementById('btn-copy');
-  btnCopy.className = 'btn-copy';
   btnCopy.textContent = 'Copia';
+  btnCopy.className   = 'btn-copy';
   btnCopy.onclick = () => {
     navigator.clipboard.writeText(pretty).then(() => {
       btnCopy.textContent = '✓ Copiato';
-      btnCopy.className = 'btn-copy copied';
-      setTimeout(() => {
-        btnCopy.textContent = 'Copia';
-        btnCopy.className = 'btn-copy';
-      }, 2000);
+      btnCopy.className   = 'btn-copy copied';
+      setTimeout(() => { btnCopy.textContent = 'Copia'; btnCopy.className = 'btn-copy'; }, 2000);
     });
   };
-}
+});
 
-function setLoading(active) {
-  document.getElementById('spinner').className    = active ? 'spinner active' : 'spinner';
-  document.getElementById('btn-generate').disabled = active;
-}
+document.getElementById('btn-reset').addEventListener('click', () => {
+  ['f-title','f-desc','f-ref'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('f-category').value = '';
+  const checked = document.querySelector('input[name="severity"]:checked');
+  if (checked) checked.checked = false;
+  ['err-title','err-cat','err-desc','err-sev'].forEach(id =>
+    document.getElementById(id).classList.remove('show'));
+  ['preview-panel','output-panel','instructions'].forEach(id =>
+    document.getElementById(id).classList.remove('show'));
+});
 
-function showError(msg) {
-  const box = document.getElementById('error-box');
-  box.textContent = msg;
-  box.className = 'error-box active';
-}
+// Nascondi errori all'input
+document.getElementById('f-title').addEventListener('input',    () => document.getElementById('err-title').classList.remove('show'));
+document.getElementById('f-category').addEventListener('change', () => document.getElementById('err-cat').classList.remove('show'));
+document.getElementById('f-desc').addEventListener('input',     () => document.getElementById('err-desc').classList.remove('show'));
+document.querySelectorAll('input[name="severity"]').forEach(r =>
+  r.addEventListener('change', () => document.getElementById('err-sev').classList.remove('show')));
 </script>
 </body>
 </html>
