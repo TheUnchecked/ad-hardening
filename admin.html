@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin — AD Hardening</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:         #0d0f0f;
+      --surface:    #141717;
+      --surface2:   #1c2020;
+      --border:     #2a3030;
+      --accent:     #00e5a0;
+      --accent-dim: #00a872;
+      --text:       #d4dbd8;
+      --text-muted: #6b7875;
+      --critical:   #ff4d4d;
+      --high:       #ff8c42;
+      --medium:     #f5c518;
+      --low:        #4caf50;
+      --mono:       'JetBrains Mono', monospace;
+      --sans:       'Syne', sans-serif;
+      --radius:     6px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+      padding: 40px 24px;
+    }
+
+    .container {
+      max-width: 820px;
+      margin: 0 auto;
+    }
+
+    /* HEADER */
+    .page-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 36px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .page-header h1 {
+      font-family: var(--sans);
+      font-size: 28px;
+      font-weight: 800;
+      color: #fff;
+      letter-spacing: -.02em;
+    }
+
+    .page-header h1 span { color: var(--accent); }
+
+    .back-link {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-decoration: none;
+      border: 1px solid var(--border);
+      padding: 5px 12px;
+      border-radius: var(--radius);
+      transition: all .15s;
+    }
+    .back-link:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+    /* API KEY */
+    .api-section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .api-section label {
+      font-size: 12px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .api-section input {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 7px 12px;
+      border-radius: var(--radius);
+      outline: none;
+      transition: border-color .15s;
+    }
+    .api-section input:focus { border-color: var(--accent-dim); }
+    .api-section input::placeholder { color: var(--text-muted); }
+
+    .api-hint {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 6px;
+      margin-bottom: 24px;
+    }
+    .api-hint a { color: var(--accent-dim); }
+
+    /* FORM */
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    textarea {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 14px 16px;
+      border-radius: var(--radius);
+      resize: vertical;
+      min-height: 160px;
+      outline: none;
+      line-height: 1.7;
+      transition: border-color .15s;
+    }
+    textarea:focus { border-color: var(--accent-dim); }
+    textarea::placeholder { color: var(--text-muted); }
+
+    .cat-select {
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 9px 12px;
+      border-radius: var(--radius);
+      outline: none;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+    .cat-select:focus { border-color: var(--accent-dim); }
+
+    .btn-generate {
+      width: 100%;
+      background: var(--accent);
+      border: none;
+      color: #000;
+      font-family: var(--sans);
+      font-weight: 700;
+      font-size: 14px;
+      padding: 13px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      letter-spacing: .04em;
+      transition: opacity .15s;
+      margin-top: 4px;
+    }
+    .btn-generate:hover { opacity: .88; }
+    .btn-generate:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* SPINNER */
+    .spinner {
+      display: none;
+      text-align: center;
+      padding: 32px;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+    .spinner.active { display: block; }
+    .spinner::before {
+      content: '';
+      display: block;
+      width: 28px; height: 28px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      margin: 0 auto 12px;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* RISULTATO */
+    .result-section {
+      display: none;
+      margin-top: 28px;
+    }
+    .result-section.active { display: block; }
+
+    .result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .result-title {
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .btn-copy {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 5px 12px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .btn-copy:hover { border-color: var(--accent-dim); color: var(--accent); }
+    .btn-copy.copied { border-color: var(--accent); color: var(--accent); }
+
+    .result-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      overflow-x: auto;
+    }
+
+    .result-box pre {
+      font-family: var(--mono);
+      font-size: 12.5px;
+      line-height: 1.7;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* ISTRUZIONI */
+    .instructions {
+      margin-top: 28px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent-dim);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+    }
+
+    .instructions p {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .instructions p:last-child { margin-bottom: 0; }
+    .instructions strong { color: var(--text); }
+
+    /* ERRORE */
+    .error-box {
+      display: none;
+      margin-top: 20px;
+      background: rgba(255,77,77,.08);
+      border: 1px solid rgba(255,77,77,.3);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      font-size: 13px;
+      color: var(--critical);
+    }
+    .error-box.active { display: block; }
+
+    /* PREVIEW CARD */
+    .preview-card {
+      margin-top: 20px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+    }
+
+    .preview-title {
+      font-size: 11px;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+
+    .preview-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+    }
+
+    .preview-item-title { font-size: 13px; color: var(--text); margin-bottom: 6px; }
+    .preview-item-desc  { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .preview-meta       { display: flex; gap: 8px; align-items: center; }
+
+    .badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 20px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+    .badge-critical { background: rgba(255,77,77,.15); color: var(--critical); }
+    .badge-high     { background: rgba(255,140,66,.15); color: var(--high); }
+    .badge-medium   { background: rgba(245,197,24,.15); color: var(--medium); }
+    .badge-low      { background: rgba(76,175,80,.15);  color: var(--low); }
+
+    .preview-cat { font-size: 11px; color: var(--text-muted); }
+    .preview-ref { font-size: 11px; color: var(--text-muted); margin-left: auto; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <div class="page-header">
+    <h1>Admin <span>→</span> Aggiungi controllo</h1>
+    <a href="index.html" class="back-link">← Torna al sito</a>
+  </div>
+
+  <!-- API KEY -->
+  <div class="api-section">
+    <label>API Key Anthropic</label>
+    <input type="password" id="api-key" placeholder="sk-ant-..." autocomplete="off" />
+  </div>
+  <p class="api-hint">
+    La chiave è usata solo nel browser, non viene salvata né inviata altrove.
+    Ottienila su <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a>.
+  </p>
+
+  <!-- FORM -->
+  <div class="form-group">
+    <label class="form-label">Nota grezza</label>
+    <textarea id="raw-note" placeholder="Incolla qui la tua nota, appunto, comando PowerShell, link, testo libero...
+
+Esempio:
+Abilitare SMB signing sui DC altrimenti sei esposto a relay attacks. 
+Comando: Set-SmbServerConfiguration -RequireSecuritySignature $true
+Ref: CIS Windows L1 2.3.9.2"></textarea>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label">Categoria (opzionale — se non indicata Claude la suggerisce)</label>
+    <select class="cat-select" id="cat-select">
+      <option value="">— Lascia decidere a Claude —</option>
+      <option value="identity-access">Identity & Access</option>
+      <option value="password-auth">Password & Authentication Policy</option>
+      <option value="kerberos">Kerberos & protocolli di autenticazione</option>
+      <option value="group-policy">Group Policy</option>
+      <option value="logging-audit">Logging & auditing</option>
+      <option value="services-config">Servizi & configurazione</option>
+      <option value="patching">Patching & lifecycle</option>
+    </select>
+  </div>
+
+  <button class="btn-generate" id="btn-generate">⚡ Genera JSON</button>
+
+  <div class="spinner" id="spinner">Analisi in corso…</div>
+  <div class="error-box" id="error-box"></div>
+
+  <!-- RISULTATO -->
+  <div class="result-section" id="result-section">
+
+    <div class="preview-card" id="preview-card">
+      <div class="preview-title">Anteprima controllo</div>
+      <div class="preview-item">
+        <div class="preview-item-title" id="prev-title">—</div>
+        <div class="preview-item-desc"  id="prev-desc">—</div>
+        <div class="preview-meta">
+          <span class="badge" id="prev-badge">—</span>
+          <span class="preview-cat" id="prev-cat">—</span>
+          <span class="preview-ref" id="prev-ref"></span>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:20px">
+      <div class="result-header">
+        <span class="result-title">JSON da aggiungere a checklist.json</span>
+        <button class="btn-copy" id="btn-copy">Copia</button>
+      </div>
+      <div class="result-box">
+        <pre id="result-pre"></pre>
+      </div>
+    </div>
+
+    <div class="instructions">
+      <p><strong>Come aggiungere il controllo:</strong></p>
+      <p>1. Copia il JSON qui sopra.</p>
+      <p>2. Apri <code>data/checklist.json</code> nel repo GitHub.</p>
+      <p>3. Trova la categoria corrispondente e incolla l'oggetto nell'array <code>"items"</code>, separato da virgola.</p>
+      <p>4. Salva il file — il sito si aggiorna automaticamente.</p>
+    </div>
+
+  </div>
+
+</div>
+
+<script>
+const CATEGORIES = {
+  'identity-access':  'Identity & Access',
+  'password-auth':    'Password & Authentication Policy',
+  'kerberos':         'Kerberos & protocolli di autenticazione',
+  'group-policy':     'Group Policy',
+  'logging-audit':    'Logging & auditing',
+  'services-config':  'Servizi & configurazione',
+  'patching':         'Patching & lifecycle'
+};
+
+const SEVERITY_LABELS = {
+  critical: 'Critico',
+  high:     'Alto',
+  medium:   'Medio',
+  low:      'Basso'
+};
+
+document.getElementById('btn-generate').addEventListener('click', async () => {
+  const apiKey  = document.getElementById('api-key').value.trim();
+  const rawNote = document.getElementById('raw-note').value.trim();
+  const catId   = document.getElementById('cat-select').value;
+
+  const errorBox = document.getElementById('error-box');
+  errorBox.className = 'error-box';
+
+  if (!apiKey) { showError('Inserisci la API key Anthropic.'); return; }
+  if (!rawNote) { showError('Inserisci una nota da analizzare.'); return; }
+
+  setLoading(true);
+  document.getElementById('result-section').className = 'result-section';
+
+  const catHint = catId
+    ? `La categoria assegnata è: "${CATEGORIES[catId]}" (id: "${catId}"). Usa esattamente questo id.`
+    : `Scegli la categoria più appropriata tra: ${Object.entries(CATEGORIES).map(([id,n]) => `"${id}" (${n})`).join(', ')}.`;
+
+  const prompt = `Sei un esperto di sicurezza Active Directory. Analizza la seguente nota grezza e genera un oggetto JSON per una checklist di hardening AD.
+
+NOTA GREZZA:
+"""
+${rawNote}
+"""
+
+${catHint}
+
+Genera un oggetto JSON con questa struttura esatta:
+{
+  "id": "xx-NNN",
+  "title": "Titolo conciso del controllo (max 80 caratteri)",
+  "description": "Descrizione tecnica dettagliata con contesto, rischio se non applicato e indicazione operativa. Almeno 2 frasi.",
+  "severity": "critical|high|medium|low",
+  "ref": "Riferimento standard (CIS, MITRE ATT&CK, CVE, Microsoft, ecc.) oppure stringa vuota",
+  "category_id": "id-categoria"
+}
+
+Regole per l'id:
+- Usa il prefisso della categoria (es: "ia" per identity-access, "pa" per password-auth, "kb" per kerberos, "gp" per group-policy, "la" per logging-audit, "sc" per services-config, "pt" per patching)
+- Usa un numero a 3 cifre progressivo (es: "ia-042")
+
+Rispondi SOLO con il JSON, senza testo aggiuntivo, senza backtick, senza markdown.`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type':         'application/json',
+        'x-api-key':            apiKey,
+        'anthropic-version':    '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model:      'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages:   [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      showError(`Errore API: ${data.error?.message || res.status}`);
+      setLoading(false);
+      return;
+    }
+
+    const raw = data.content?.find(b => b.type === 'text')?.text?.trim() || '';
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      showError('Il modello non ha restituito JSON valido. Riprova.');
+      console.error('Raw output:', raw);
+      setLoading(false);
+      return;
+    }
+
+    renderResult(parsed);
+
+  } catch (err) {
+    showError('Errore di rete: ' + err.message);
+  }
+
+  setLoading(false);
+});
+
+function renderResult(obj) {
+  // Anteprima
+  document.getElementById('prev-title').textContent = obj.title || '—';
+  document.getElementById('prev-desc').textContent  = obj.description || '—';
+  document.getElementById('prev-ref').textContent   = obj.ref || '';
+
+  const catName = CATEGORIES[obj.category_id] || obj.category_id || '—';
+  document.getElementById('prev-cat').textContent = catName;
+
+  const badge = document.getElementById('prev-badge');
+  badge.textContent  = SEVERITY_LABELS[obj.severity] || obj.severity || '—';
+  badge.className    = `badge badge-${obj.severity || 'low'}`;
+
+  // JSON formattato (senza category_id — è solo per il preview)
+  const forJson = {
+    id:          obj.id,
+    title:       obj.title,
+    description: obj.description,
+    severity:    obj.severity,
+    ref:         obj.ref || ''
+  };
+  const pretty = JSON.stringify(forJson, null, 2);
+  document.getElementById('result-pre').textContent = pretty;
+
+  document.getElementById('result-section').className = 'result-section active';
+
+  // Copia
+  const btnCopy = document.getElementById('btn-copy');
+  btnCopy.className = 'btn-copy';
+  btnCopy.textContent = 'Copia';
+  btnCopy.onclick = () => {
+    navigator.clipboard.writeText(pretty).then(() => {
+      btnCopy.textContent = '✓ Copiato';
+      btnCopy.className = 'btn-copy copied';
+      setTimeout(() => {
+        btnCopy.textContent = 'Copia';
+        btnCopy.className = 'btn-copy';
+      }, 2000);
+    });
+  };
+}
+
+function setLoading(active) {
+  document.getElementById('spinner').className    = active ? 'spinner active' : 'spinner';
+  document.getElementById('btn-generate').disabled = active;
+}
+
+function showError(msg) {
+  const box = document.getElementById('error-box');
+  box.textContent = msg;
+  box.className = 'error-box active';
+}
+</script>
+</body>
+</html>
