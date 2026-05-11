@@ -1,0 +1,305 @@
+{
+  "categories": [
+    {
+      "id": "identity-access",
+      "name": "Identity & Access",
+      "items": [
+        {
+          "id": "ia-001",
+          "title": "Disabilitare l'account Administrator predefinito e rinominarlo",
+          "description": "L'account Administrator built-in è un target primario degli attacchi. Rinominarlo riduce la superficie esposta; disabilitarlo (dove possibile) è preferibile. Usare un account named con privilegi equivalenti per le operazioni amministrative.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 1.1"
+        },
+        {
+          "id": "ia-002",
+          "title": "Disabilitare l'account Guest",
+          "description": "L'account Guest consente accesso anonimo al dominio. Deve essere disabilitato su tutti i DC e le workstation.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 1.2"
+        },
+        {
+          "id": "ia-003",
+          "title": "Limitare i membri del gruppo Domain Admins",
+          "description": "Il gruppo Domain Admins deve contenere il minor numero possibile di account. Preferire gruppi dedicati con delega granulare per attività specifiche. Verificare regolarmente la membership.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 2.1"
+        },
+        {
+          "id": "ia-004",
+          "title": "Limitare i membri del gruppo Enterprise Admins e Schema Admins",
+          "description": "Questi gruppi devono essere vuoti tranne durante operazioni che li richiedano esplicitamente (promozione DC, modifica schema). Monitorare qualsiasi aggiunta con alert immediato.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 2.2"
+        },
+        {
+          "id": "ia-005",
+          "title": "Abilitare la Protected Users Security Group per gli account privilegiati",
+          "description": "Il gruppo Protected Users applica restrizioni automatiche: nessun uso di NTLM, nessuna delega Kerberos non vincolata, ticket TGT con durata massima 4 ore. Aggiungere tutti gli account admin.",
+          "severity": "high",
+          "ref": "Microsoft Security Baseline"
+        },
+        {
+          "id": "ia-006",
+          "title": "Implementare il modello di tiering (Tier 0 / Tier 1 / Tier 2)",
+          "description": "Separare gli asset in livelli di criticità: Tier 0 (DC, PKI, ADFS), Tier 1 (server applicativi), Tier 2 (workstation). Impedire che credenziali di un tier vengano usate in un tier inferiore.",
+          "severity": "high",
+          "ref": "Microsoft ESAE / Tiering Model"
+        },
+        {
+          "id": "ia-007",
+          "title": "Verificare che nessun account di servizio sia membro di gruppi privilegiati",
+          "description": "Gli account di servizio non devono appartenere a Domain Admins, Backup Operators o gruppi equivalenti. Usare Group Managed Service Accounts (gMSA) dove possibile.",
+          "severity": "high",
+          "ref": "CIS AD L1 – 2.5"
+        },
+        {
+          "id": "ia-008",
+          "title": "Rimuovere diritti di 'Log on locally' ai Domain Admins su workstation",
+          "description": "Le credenziali admin non devono mai essere usate sulle workstation. Configurare GPO per impedire il logon locale e via RDP di account Tier 0 su sistemi Tier 2.",
+          "severity": "high",
+          "ref": "CIS AD L2 – 3.1"
+        },
+        {
+          "id": "ia-009",
+          "title": "Abilitare il controllo delle modifiche alla membership dei gruppi privilegiati",
+          "description": "Configurare audit su 'Security Group Management' per registrare ogni modifica ai gruppi sensibili (Event ID 4728, 4732, 4756). Inviare alert in tempo reale al SIEM.",
+          "severity": "medium",
+          "ref": "CIS AD L1 – 4.2"
+        },
+        {
+          "id": "ia-010",
+          "title": "Configurare account dedicati per l'amministrazione (PAW)",
+          "description": "Usare Privileged Access Workstation fisiche o virtuali dedicate per le operazioni amministrative su Tier 0. Le PAW non devono avere accesso a internet e devono usare profili separati.",
+          "severity": "medium",
+          "ref": "Microsoft PAW Guidance"
+        }
+      ]
+    },
+    {
+      "id": "password-auth",
+      "name": "Password & Authentication Policy",
+      "items": [
+        {
+          "id": "pa-001",
+          "title": "Configurare una Fine-Grained Password Policy per gli account privilegiati",
+          "description": "La Default Domain Policy si applica a tutti. Creare una PSO (Password Settings Object) per i gruppi privilegiati con requisiti più stringenti: lunghezza minima 20 caratteri, nessuna scadenza, storico 24 password.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 5.1"
+        },
+        {
+          "id": "pa-002",
+          "title": "Configurare LAPS (Local Administrator Password Solution)",
+          "description": "LAPS gestisce automaticamente le password degli account Administrator locali, rendendo ogni macchina unica. Evita il lateral movement tramite pass-the-hash con password condivise. In ambienti Windows Server 2022+ usare Windows LAPS nativo.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 5.4"
+        },
+        {
+          "id": "pa-003",
+          "title": "Disabilitare la memorizzazione della password con crittografia reversibile",
+          "description": "L'impostazione 'Store password using reversible encryption' equivale a conservare la password in chiaro. Deve essere disabilitata nella Default Domain Policy e in tutte le PSO.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 5.2"
+        },
+        {
+          "id": "pa-004",
+          "title": "Configurare la lockout policy (soglia, durata, reset)",
+          "description": "Raccomandato: soglia di blocco 5–10 tentativi, durata blocco 15 minuti, reset contatore 15 minuti. Non impostare durata = 0 (sblocco solo manuale) per evitare DoS.",
+          "severity": "high",
+          "ref": "CIS AD L1 – 5.3"
+        },
+        {
+          "id": "pa-005",
+          "title": "Abilitare MFA per tutti gli account privilegiati",
+          "description": "Implementare autenticazione a più fattori per Domain Admins e tutti gli account Tier 0/Tier 1. Soluzioni compatibili: Microsoft Entra MFA, Duo, hardware token FIDO2.",
+          "severity": "high",
+          "ref": "Microsoft Security Baseline"
+        }
+      ]
+    },
+    {
+      "id": "kerberos",
+      "name": "Kerberos & protocolli di autenticazione",
+      "items": [
+        {
+          "id": "kb-001",
+          "title": "Disabilitare NTLM v1 tramite GPO",
+          "description": "NTLMv1 è vulnerabile a attacchi di downgrade e cracking offline. Configurare 'Network security: LAN Manager authentication level' su 'Send NTLMv2 response only. Refuse LM & NTLM'.",
+          "severity": "critical",
+          "ref": "CIS Windows L1 – 2.3.11.1"
+        },
+        {
+          "id": "kb-002",
+          "title": "Identificare e mitigare gli account con AS-REP Roasting exposure",
+          "description": "Gli account con 'Do not require Kerberos preauthentication' abilitato sono vulnerabili ad AS-REP Roasting. Eseguire: Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true}. Rimuovere il flag o ruotare le password con lunghezza > 25 caratteri.",
+          "severity": "critical",
+          "ref": "MITRE ATT&CK T1558.004"
+        },
+        {
+          "id": "kb-003",
+          "title": "Identificare e mitigare gli account con Kerberoasting exposure",
+          "description": "Gli account con SPN configurato sono vulnerabili a Kerberoasting. Verificare che gli account di servizio con SPN usino password lunghe (>25 caratteri) o siano migrati a gMSA.",
+          "severity": "critical",
+          "ref": "MITRE ATT&CK T1558.003"
+        },
+        {
+          "id": "kb-004",
+          "title": "Disabilitare la delega Kerberos non vincolata (unconstrained delegation)",
+          "description": "La unconstrained delegation consente a un server di impersonare qualsiasi utente verso qualsiasi servizio. Verificare con: Get-ADComputer -Filter {TrustedForDelegation -eq $true}. Sostituire con constrained delegation o resource-based constrained delegation.",
+          "severity": "critical",
+          "ref": "MITRE ATT&CK T1134.001"
+        },
+        {
+          "id": "kb-005",
+          "title": "Marcare l'account krbtgt come sensibile e ruotare la password periodicamente",
+          "description": "Ruotare la password dell'account krbtgt almeno una volta l'anno (o dopo un incidente). La rotazione deve avvenire due volte consecutive per invalidare tutti i Golden Ticket esistenti. Usare lo script Microsoft Reset-KrbtgtKeyInteractiveWorkflow.",
+          "severity": "high",
+          "ref": "Microsoft Security Advisory"
+        },
+        {
+          "id": "kb-006",
+          "title": "Abilitare il flag 'Account is sensitive and cannot be delegated' per gli account privilegiati",
+          "description": "Abilitare questo flag su tutti gli account Tier 0 e Domain Admins per impedire che le loro credenziali vengano delegate da un server compromesso.",
+          "severity": "high",
+          "ref": "CIS AD L1 – 3.3"
+        }
+      ]
+    },
+    {
+      "id": "group-policy",
+      "name": "Group Policy",
+      "items": [
+        {
+          "id": "gp-001",
+          "title": "Applicare una baseline GPO ai Domain Controller",
+          "description": "Usare le Microsoft Security Baseline o le CIS Benchmark GPO per i DC. Non modificare la Default Domain Controllers Policy direttamente: creare GPO dedicate con priorità superiore.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 6.1"
+        },
+        {
+          "id": "gp-002",
+          "title": "Proteggere le GPO sensibili con permissions corrette",
+          "description": "Verificare che solo i gruppi autorizzati abbiano permessi di modifica sulle GPO critiche. Abilitare 'GPO Status' per le GPO inutilizzate. Usare GPMC per l'audit regolare dei permessi.",
+          "severity": "high",
+          "ref": "CIS AD L1 – 6.3"
+        },
+        {
+          "id": "gp-003",
+          "title": "Disabilitare LM hash storage tramite GPO",
+          "description": "Configurare 'Network security: Do not store LAN Manager hash value on next password change' su Enabled. Gli LM hash sono facilmente crackabili anche offline.",
+          "severity": "high",
+          "ref": "CIS Windows L1 – 2.3.11.2"
+        },
+        {
+          "id": "gp-004",
+          "title": "Abilitare Windows Defender Credential Guard",
+          "description": "Credential Guard isola LSASS in un ambiente virtualizzato, impedendo l'estrazione di credenziali tramite Mimikatz e tool simili. Richiede UEFI, Secure Boot e Hyper-V.",
+          "severity": "high",
+          "ref": "Microsoft Security Baseline"
+        }
+      ]
+    },
+    {
+      "id": "logging-audit",
+      "name": "Logging & auditing",
+      "items": [
+        {
+          "id": "la-001",
+          "title": "Abilitare l'audit avanzato sui Domain Controller",
+          "description": "Configurare Advanced Audit Policy tramite GPO: abilitare almeno Account Logon, Account Management, DS Access, Logon/Logoff, Object Access, Policy Change, Privilege Use e System. Non usare la Basic Audit Policy.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 7.1"
+        },
+        {
+          "id": "la-002",
+          "title": "Centralizzare i log dei DC su un SIEM o log collector",
+          "description": "I log dei DC devono essere inviati in tempo reale a un sistema centralizzato non accessibile dagli amministratori del dominio. Configurare almeno la raccolta degli Event ID critici: 4624, 4625, 4648, 4720, 4728, 4732, 4756, 4768, 4769, 4771.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 7.3"
+        },
+        {
+          "id": "la-003",
+          "title": "Aumentare la dimensione massima del Security Event Log",
+          "description": "Impostare la dimensione massima del Security log su almeno 1 GB sui DC (default 20 MB è insufficiente). Configurare la policy di retention su 'Overwrite events as needed' o, preferibilmente, archiviare i log prima della rotazione.",
+          "severity": "high",
+          "ref": "CIS Windows L1 – 18.9.26"
+        },
+        {
+          "id": "la-004",
+          "title": "Abilitare il logging di PowerShell (Script Block Logging e Module Logging)",
+          "description": "Configurare tramite GPO: Computer Configuration > Administrative Templates > Windows Components > Windows PowerShell. Abilitare 'Turn on PowerShell Script Block Logging' e 'Turn on Module Logging'. I log finiscono nell'Event Log sotto Microsoft-Windows-PowerShell/Operational.",
+          "severity": "high",
+          "ref": "CIS Windows L1 – 18.9.100"
+        }
+      ]
+    },
+    {
+      "id": "services-config",
+      "name": "Servizi & configurazione",
+      "items": [
+        {
+          "id": "sc-001",
+          "title": "Abilitare LDAP signing e LDAP channel binding",
+          "description": "Senza LDAP signing, un attaccante può eseguire relay LDAP. Configurare 'Domain controller: LDAP server signing requirements' su 'Require signing'. Abilitare anche LDAP channel binding (KB4520412).",
+          "severity": "critical",
+          "ref": "Microsoft Security Advisory ADV190023"
+        },
+        {
+          "id": "sc-002",
+          "title": "Disabilitare SMBv1 su tutti i sistemi",
+          "description": "SMBv1 è vulnerabile a EternalBlue (MS17-010) e non supporta moderne funzionalità di sicurezza. Disabilitare tramite GPO e PowerShell: Set-SmbServerConfiguration -EnableSMB1Protocol $false.",
+          "severity": "critical",
+          "ref": "CIS Windows L1 – 18.3.3"
+        },
+        {
+          "id": "sc-003",
+          "title": "Abilitare SMB signing obbligatorio",
+          "description": "Senza SMB signing è possibile eseguire attacchi NTLM relay. Configurare 'Microsoft network server: Digitally sign communications (always)' su Enabled per DC e server critici.",
+          "severity": "critical",
+          "ref": "CIS Windows L1 – 2.3.9.2"
+        },
+        {
+          "id": "sc-004",
+          "title": "Disabilitare il servizio Print Spooler sui Domain Controller",
+          "description": "Il servizio Print Spooler è stato sfruttato in PrintNightmare (CVE-2021-1675) e in attacchi di coercizione dell'autenticazione. Non è necessario sui DC e deve essere disabilitato.",
+          "severity": "critical",
+          "ref": "CVE-2021-1675 / PrintNightmare"
+        },
+        {
+          "id": "sc-005",
+          "title": "Limitare i protocolli legacy: disabilitare WDigest",
+          "description": "WDigest causa la memorizzazione delle password in chiaro nella memoria di LSASS, facilitando l'estrazione con Mimikatz. Disabilitare tramite registry: HKLM\\SYSTEM\\CurrentControlSet\\Control\\SecurityProviders\\WDigest → UseLogonCredential = 0.",
+          "severity": "high",
+          "ref": "Microsoft KB2871997"
+        }
+      ]
+    },
+    {
+      "id": "patching",
+      "name": "Patching & lifecycle",
+      "items": [
+        {
+          "id": "pt-001",
+          "title": "Mantenere i Domain Controller aggiornati con le patch di sicurezza",
+          "description": "Applicare le patch di sicurezza Microsoft entro 30 giorni dal rilascio per le criticità medie, entro 7 giorni per le critiche. Testare in ambiente di pre-produzione prima di applicare ai DC di produzione.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 8.1"
+        },
+        {
+          "id": "pt-002",
+          "title": "Verificare che i Domain Controller non eseguano sistemi operativi fuori supporto",
+          "description": "I sistemi fuori supporto non ricevono più patch di sicurezza. Pianificare la migrazione prima dell'end-of-life. Stato attuale: Windows Server 2012/R2 è giunto a fine supporto esteso (ottobre 2023).",
+          "severity": "critical",
+          "ref": "Microsoft Lifecycle Policy"
+        },
+        {
+          "id": "pt-003",
+          "title": "Pianificare e testare il processo di ripristino dei Domain Controller",
+          "description": "Eseguire backup regolari dello stato del sistema (System State Backup) su tutti i DC. Testare il ripristino almeno annualmente in ambiente isolato. Documentare il processo di disaster recovery.",
+          "severity": "high",
+          "ref": "Best practice Microsoft AD"
+        }
+      ]
+    }
+  ]
+}
