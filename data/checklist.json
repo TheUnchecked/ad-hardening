@@ -7,72 +7,120 @@
         {
           "id": "ia-001",
           "title": "Disabilitare l'account Administrator predefinito e rinominarlo",
-          "description": "L'account Administrator built-in è un target primario degli attacchi. Rinominarlo riduce la superficie esposta; disabilitarlo (dove possibile) è preferibile. Usare un account named con privilegi equivalenti per le operazioni amministrative.",
+          "description": "L'account Administrator built-in è un target primario degli attacchi. Rinominarlo riduce la superficie esposta; disabilitarlo dove possibile è preferibile.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 1.1"
+          "ref": "CIS AD L1 – 1.1",
+          "tags": ["active-directory", "account-management", "privilege"],
+          "command_quick": "# Rinomina account Administrator\nRename-LocalUser -Name 'Administrator' -NewName 'adm-corp-01'\n\n# Disabilita account\nDisable-LocalUser -Name 'adm-corp-01'",
+          "command_full": "# Step 1: Rinomina via GPO\n# Computer Config > Policies > Windows Settings > Security Settings\n# > Local Policies > Security Options\n# 'Accounts: Rename administrator account' → imposta nuovo nome\n\n# Step 2: Disabilita via GPO\n# 'Accounts: Administrator account status' → Disabled\n\n# Step 3: Verifica su tutti i DC\n$dcs = Get-ADDomainController -Filter *\nforeach ($dc in $dcs) {\n    $acct = Get-ADUser -Identity 'Administrator' -Server $dc.Name\n    Write-Host \"$($dc.Name): Enabled=$($acct.Enabled)\"\n}",
+          "guidance": {
+            "exposure": "L'account Administrator built-in ha un SID fisso e prevedibile (S-1-5-21-...-500). Gli attaccanti lo usano come primo target nei bruteforce e nei movimenti laterali. Anche con password complessa, il nome prevedibile facilita gli attacchi di tipo credential stuffing e pass-the-hash.",
+            "execution": [
+              "Creare un account named con privilegi equivalenti per le operazioni amministrative quotidiane",
+              "Rinominare l'account Administrator built-in via GPO su tutti i sistemi",
+              "Disabilitare l'account Administrator built-in dove non strettamente necessario",
+              "Configurare LAPS per gestire la password dell'account locale sui sistemi non-DC",
+              "Verificare la modifica su tutti i Domain Controller e le workstation"
+            ],
+            "verification": "# Verifica stato account Administrator su tutti i DC\nGet-ADDomainController -Filter * | ForEach-Object {\n    $u = Get-ADUser -Identity 500 -Server $_.Name -Properties Enabled, SamAccountName\n    [PSCustomObject]@{ DC=$_.Name; Nome=$u.SamAccountName; Abilitato=$u.Enabled }\n}\n\n# Verifica via GPO applicata\ngpresult /r /scope:computer | findstr -i 'administrator'",
+            "considerations": "Su alcuni ambienti legacy, applicazioni o script potrebbero referenziare esplicitamente 'Administrator'. Censire questi casi prima di procedere con la rinomina. La disabilitazione dell'account in modalità DSRM (Directory Services Restore Mode) richiede una procedura separata.",
+            "signals": "# Tentativi di logon sull'account Administrator (Event ID 4625)\nindex=windows EventCode=4625 TargetUserName='Administrator'\n| stats count by ComputerName, IpAddress\n| sort -count\n\n# Logon riusciti con account ..-500 (SID)\nindex=windows EventCode=4624 TargetUserSid='*-500'\n| table _time, ComputerName, IpAddress, LogonType",
+            "related": ["ia-002", "ia-003", "pa-002"]
+          }
         },
         {
           "id": "ia-002",
           "title": "Disabilitare l'account Guest",
           "description": "L'account Guest consente accesso anonimo al dominio. Deve essere disabilitato su tutti i DC e le workstation.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 1.2"
+          "ref": "CIS AD L1 – 1.2",
+          "tags": ["active-directory", "account-management"],
+          "command_quick": "# Disabilita account Guest\nDisable-ADAccount -Identity 'Guest'",
+          "command_full": "# Verifica stato attuale\nGet-ADUser -Identity 'Guest' -Properties Enabled | Select Name, Enabled\n\n# Disabilita su tutti i DC\nGet-ADDomainController -Filter * | ForEach-Object {\n    Disable-ADAccount -Identity 'Guest' -Server $_.Name\n    Write-Host \"Guest disabilitato su $($_.Name)\"\n}\n\n# Conferma via GPO\n# Computer Config > Windows Settings > Security Settings\n# > Local Policies > Security Options\n# 'Accounts: Guest account status' → Disabled",
+          "guidance": {
+            "exposure": "L'account Guest permette accesso senza autenticazione a risorse condivise e può essere sfruttato per la ricognizione interna della rete. In ambienti con SMB o share di rete, un Guest attivo può essere usato per enumerare utenti e risorse senza lasciare tracce significative nei log.",
+            "execution": [
+              "Verificare lo stato dell'account Guest su tutti i DC con Get-ADUser",
+              "Disabilitare l'account tramite PowerShell o GPO",
+              "Applicare la GPO 'Accounts: Guest account status = Disabled' a livello di dominio",
+              "Verificare che nessuna applicazione legacy dipenda dall'account Guest"
+            ],
+            "verification": "# Verifica stato Guest su tutto il dominio\nGet-ADDomainController -Filter * | ForEach-Object {\n    $g = Get-ADUser -Identity 'Guest' -Server $_.Name -Properties Enabled\n    [PSCustomObject]@{ DC=$_.Name; Abilitato=$g.Enabled }\n}",
+            "considerations": "Alcuni ambienti con stampanti di rete o applicazioni legacy usano l'account Guest per accedere a share. Identificare questi casi prima di disabilitare e sostituire con account di servizio dedicati.",
+            "signals": "# Logon con account Guest (Event ID 4624)\nindex=windows EventCode=4624 TargetUserName='Guest'\n| table _time, ComputerName, IpAddress, LogonType\n| sort -_time",
+            "related": ["ia-001", "sc-002"]
+          }
         },
         {
           "id": "ia-003",
           "title": "Limitare i membri del gruppo Domain Admins",
-          "description": "Il gruppo Domain Admins deve contenere il minor numero possibile di account. Preferire gruppi dedicati con delega granulare per attività specifiche. Verificare regolarmente la membership.",
+          "description": "Il gruppo Domain Admins deve contenere il minor numero possibile di account. Preferire gruppi dedicati con delega granulare per attività specifiche.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 2.1"
+          "ref": "CIS AD L1 – 2.1",
+          "tags": ["active-directory", "privilege", "group-management"],
+          "command_quick": "# Elenca membri Domain Admins\nGet-ADGroupMember -Identity 'Domain Admins' -Recursive | Select Name, SamAccountName, objectClass",
+          "command_full": "# Audit completo membership\nGet-ADGroupMember -Identity 'Domain Admins' -Recursive | ForEach-Object {\n    $u = Get-ADObject $_.distinguishedName -Properties LastLogonDate, PasswordLastSet, Enabled\n    [PSCustomObject]@{\n        Nome           = $_.Name\n        Tipo           = $_.objectClass\n        Abilitato      = $u.Enabled\n        UltimoLogon    = $u.LastLogonDate\n        UltimaPwd      = $u.PasswordLastSet\n    }\n} | Format-Table -AutoSize\n\n# Rimuovi account non necessari\nRemove-ADGroupMember -Identity 'Domain Admins' -Members 'utente01' -Confirm:$false",
+          "guidance": {
+            "exposure": "Ogni account in Domain Admins è un vettore di compromissione dell'intero dominio. Se un account Domain Admin viene compromesso tramite phishing o credential theft, l'attaccante ottiene controllo totale su tutti i sistemi del dominio. Il principio del minimo privilegio richiede che questo gruppo sia ridotto al minimo indispensabile.",
+            "execution": [
+              "Eseguire un audit completo della membership corrente con Get-ADGroupMember",
+              "Identificare gli account che non richiedono privilegi Domain Admin",
+              "Creare gruppi con delega granulare per attività specifiche (es. gestione DNS, gestione DHCP)",
+              "Rimuovere tutti gli account non strettamente necessari da Domain Admins",
+              "Configurare un alert automatico su qualsiasi modifica al gruppo (Event ID 4728)"
+            ],
+            "verification": "# Numero membri Domain Admins\n(Get-ADGroupMember -Identity 'Domain Admins' -Recursive).Count\n\n# Verifica account di servizio nel gruppo\nGet-ADGroupMember -Identity 'Domain Admins' -Recursive |\n    Where-Object { $_.objectClass -eq 'user' } |\n    Get-ADUser -Properties ServicePrincipalNames |\n    Where-Object { $_.ServicePrincipalNames.Count -gt 0 }",
+            "considerations": "In domini di piccole dimensioni, può essere difficile separare completamente i ruoli. In questo caso, limitarsi almeno a 2-3 account nominativi e mai account condivisi o di servizio. Documentare ogni eccezione.",
+            "signals": "# Aggiunta a Domain Admins (Event ID 4728)\nindex=windows EventCode=4728 TargetUserName='Domain Admins'\n| table _time, SubjectUserName, MemberName, ComputerName\n| sort -_time\n\n# Alert immediato su qualsiasi modifica\nindex=windows EventCode IN (4728, 4729) GroupName='Domain Admins'",
+            "related": ["ia-004", "ia-005", "ia-006"]
+          }
         },
         {
           "id": "ia-004",
-          "title": "Limitare i membri del gruppo Enterprise Admins e Schema Admins",
-          "description": "Questi gruppi devono essere vuoti tranne durante operazioni che li richiedano esplicitamente (promozione DC, modifica schema). Monitorare qualsiasi aggiunta con alert immediato.",
+          "title": "Limitare i membri di Enterprise Admins e Schema Admins",
+          "description": "Questi gruppi devono essere vuoti tranne durante operazioni che li richiedano esplicitamente. Monitorare qualsiasi aggiunta con alert immediato.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 2.2"
+          "ref": "CIS AD L1 – 2.2",
+          "tags": ["active-directory", "privilege", "group-management"],
+          "command_quick": "# Verifica membership\nGet-ADGroupMember 'Enterprise Admins' | Select Name\nGet-ADGroupMember 'Schema Admins' | Select Name",
+          "command_full": "# Audit entrambi i gruppi\nforeach ($group in @('Enterprise Admins','Schema Admins')) {\n    $members = Get-ADGroupMember -Identity $group -Recursive\n    Write-Host \"=== $group ===\"\n    if ($members.Count -eq 0) { Write-Host 'VUOTO (corretto)' }\n    else { $members | Select Name, SamAccountName, objectClass | Format-Table }\n}\n\n# Rimuovi tutti i membri\nGet-ADGroupMember 'Enterprise Admins' | ForEach-Object {\n    Remove-ADGroupMember -Identity 'Enterprise Admins' -Members $_ -Confirm:$false\n}",
+          "guidance": {
+            "exposure": "Enterprise Admins e Schema Admins sono i gruppi più privilegiati in un forest Active Directory. Un account compromesso in questi gruppi consente modifiche all'intera foresta, inclusa la modifica dello schema AD — un'operazione praticamente irreversibile. Devono rimanere vuoti nella configurazione standard.",
+            "execution": [
+              "Verificare che entrambi i gruppi siano vuoti con Get-ADGroupMember",
+              "Rimuovere tutti i membri non giustificati",
+              "Documentare la procedura per aggiungere temporaneamente account (es. durante promozione DC o modifica schema)",
+              "Configurare alert immediati su Event ID 4728 per entrambi i gruppi",
+              "Revocare i privilegi immediatamente al termine delle operazioni che li richiedono"
+            ],
+            "verification": "# I gruppi devono restituire 0 membri\n(Get-ADGroupMember 'Enterprise Admins').Count\n(Get-ADGroupMember 'Schema Admins').Count",
+            "considerations": "Le operazioni che richiedono Enterprise Admins (promozione DC in nuovo sito, trust tra foreste) devono essere pianificate, eseguite con account temporanei e documentate. Lo Schema Admin è necessario solo per installazioni di prodotti che estendono lo schema AD (es. Exchange, SCCM).",
+            "signals": "# Qualsiasi aggiunta a questi gruppi deve generare alert P1\nindex=windows EventCode=4728\n| where GroupName IN ('Enterprise Admins','Schema Admins')\n| table _time, SubjectUserName, MemberName, ComputerName\n| eval priority='CRITICO'",
+            "related": ["ia-003", "ia-005"]
+          }
         },
         {
           "id": "ia-005",
-          "title": "Abilitare la Protected Users Security Group per gli account privilegiati",
-          "description": "Il gruppo Protected Users applica restrizioni automatiche: nessun uso di NTLM, nessuna delega Kerberos non vincolata, ticket TGT con durata massima 4 ore. Aggiungere tutti gli account admin.",
+          "title": "Abilitare Protected Users Security Group per gli account privilegiati",
+          "description": "Il gruppo Protected Users applica restrizioni automatiche: nessun NTLM, nessuna delega Kerberos non vincolata, TGT con durata massima 4 ore.",
           "severity": "high",
-          "ref": "Microsoft Security Baseline"
-        },
-        {
-          "id": "ia-006",
-          "title": "Implementare il modello di tiering (Tier 0 / Tier 1 / Tier 2)",
-          "description": "Separare gli asset in livelli di criticità: Tier 0 (DC, PKI, ADFS), Tier 1 (server applicativi), Tier 2 (workstation). Impedire che credenziali di un tier vengano usate in un tier inferiore.",
-          "severity": "high",
-          "ref": "Microsoft ESAE / Tiering Model"
-        },
-        {
-          "id": "ia-007",
-          "title": "Verificare che nessun account di servizio sia membro di gruppi privilegiati",
-          "description": "Gli account di servizio non devono appartenere a Domain Admins, Backup Operators o gruppi equivalenti. Usare Group Managed Service Accounts (gMSA) dove possibile.",
-          "severity": "high",
-          "ref": "CIS AD L1 – 2.5"
-        },
-        {
-          "id": "ia-008",
-          "title": "Rimuovere diritti di 'Log on locally' ai Domain Admins su workstation",
-          "description": "Le credenziali admin non devono mai essere usate sulle workstation. Configurare GPO per impedire il logon locale e via RDP di account Tier 0 su sistemi Tier 2.",
-          "severity": "high",
-          "ref": "CIS AD L2 – 3.1"
-        },
-        {
-          "id": "ia-009",
-          "title": "Abilitare il controllo delle modifiche alla membership dei gruppi privilegiati",
-          "description": "Configurare audit su 'Security Group Management' per registrare ogni modifica ai gruppi sensibili (Event ID 4728, 4732, 4756). Inviare alert in tempo reale al SIEM.",
-          "severity": "medium",
-          "ref": "CIS AD L1 – 4.2"
-        },
-        {
-          "id": "ia-010",
-          "title": "Configurare account dedicati per l'amministrazione (PAW)",
-          "description": "Usare Privileged Access Workstation fisiche o virtuali dedicate per le operazioni amministrative su Tier 0. Le PAW non devono avere accesso a internet e devono usare profili separati.",
-          "severity": "medium",
-          "ref": "Microsoft PAW Guidance"
+          "ref": "Microsoft Security Baseline",
+          "tags": ["active-directory", "kerberos", "ntlm", "privilege"],
+          "command_quick": "# Aggiungi account admin a Protected Users\nAdd-ADGroupMember -Identity 'Protected Users' -Members 'adminuser01'",
+          "command_full": "# Aggiungi tutti i Domain Admins a Protected Users\nGet-ADGroupMember 'Domain Admins' | ForEach-Object {\n    Add-ADGroupMember -Identity 'Protected Users' -Members $_\n    Write-Host \"Aggiunto: $($_.Name)\"\n}\n\n# Verifica membership\nGet-ADGroupMember 'Protected Users' | Select Name, SamAccountName\n\n# Testa che NTLM sia bloccato per un utente protetto\n# (tentare autenticazione NTLM deve fallire)",
+          "guidance": {
+            "exposure": "Senza Protected Users, gli account privilegiati possono usare NTLM (vulnerabile a relay attack), avere ticket Kerberos con lunga durata e supportare la delega — tutti vettori di movimento laterale e privilege escalation. Protected Users elimina queste vulnerabilità con un singolo gruppo.",
+            "execution": [
+              "Testare prima su un account non critico per verificare compatibilità applicativa",
+              "Aggiungere tutti gli account Domain Admins e Tier 0 al gruppo Protected Users",
+              "Verificare che nessun account nel gruppo usi NTLM o delega Kerberos",
+              "Monitorare eventuali errori di autenticazione nelle prime 24 ore dopo l'aggiunta"
+            ],
+            "verification": "# Verifica membership Protected Users\nGet-ADGroupMember 'Protected Users' | Select Name\n\n# Verifica che Kerberos DES e RC4 siano disabilitati\nGet-ADUser adminuser01 -Properties KerberosEncryptionType | Select KerberosEncryptionType",
+            "considerations": "Protected Users non è compatibile con: autenticazione digest, NTLM (anche NTLMv2), delega vincolata e non vincolata, DES e RC4 per Kerberos. Verificare che le applicazioni usate dagli admin non dipendano da questi protocolli prima di aggiungere gli account.",
+            "signals": "# Fallimenti autenticazione per utenti Protected Users\nindex=windows EventCode=4625\n| lookup protected_users_list TargetUserName\n| where isProtected=true\n| stats count by TargetUserName, FailureReason, ComputerName",
+            "related": ["ia-003", "kb-001", "kb-004"]
+          }
         }
       ]
     },
@@ -82,38 +130,51 @@
       "items": [
         {
           "id": "pa-001",
-          "title": "Configurare una Fine-Grained Password Policy per gli account privilegiati",
-          "description": "La Default Domain Policy si applica a tutti. Creare una PSO (Password Settings Object) per i gruppi privilegiati con requisiti più stringenti: lunghezza minima 20 caratteri, nessuna scadenza, storico 24 password.",
+          "title": "Configurare Fine-Grained Password Policy per gli account privilegiati",
+          "description": "Creare una PSO per i gruppi privilegiati con requisiti più stringenti: lunghezza minima 20 caratteri, nessuna scadenza, storico 24 password.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 5.1"
+          "ref": "CIS AD L1 – 5.1",
+          "tags": ["password-policy", "pso", "privilege"],
+          "command_quick": "# Crea PSO per admin\nNew-ADFineGrainedPasswordPolicy -Name 'PSO-Admins' -Precedence 10 -MinPasswordLength 20 -PasswordHistoryCount 24 -ComplexityEnabled $true -ReversibleEncryptionEnabled $false -MaxPasswordAge 0 -LockoutThreshold 5 -LockoutDuration '00:30:00'",
+          "command_full": "# Crea PSO\nNew-ADFineGrainedPasswordPolicy -Name 'PSO-Admins' `\n    -Precedence 10 `\n    -MinPasswordLength 20 `\n    -PasswordHistoryCount 24 `\n    -ComplexityEnabled $true `\n    -ReversibleEncryptionEnabled $false `\n    -MaxPasswordAge ([TimeSpan]::Zero) `\n    -MinPasswordAge '1.00:00:00' `\n    -LockoutThreshold 5 `\n    -LockoutDuration '00:30:00' `\n    -LockoutObservationWindow '00:30:00'\n\n# Applica al gruppo Domain Admins\nAdd-ADFineGrainedPasswordPolicySubject -Identity 'PSO-Admins' -Subjects 'Domain Admins'\n\n# Verifica applicazione\nGet-ADUserResultantPasswordPolicy -Identity 'adminuser01'",
+          "guidance": {
+            "exposure": "La Default Domain Policy con password di 8 caratteri e scadenza 90 giorni è inadeguata per gli account privilegiati. Password corte sono vulnerabili a cracking offline; la scadenza frequente porta gli admin a scegliere password deboli prevedibili. Una PSO dedicata impone standard più elevati senza impattare gli utenti normali.",
+            "execution": [
+              "Creare la PSO con New-ADFineGrainedPasswordPolicy",
+              "Impostare lunghezza minima 20 caratteri, nessuna scadenza, storico 24",
+              "Applicare la PSO al gruppo Domain Admins e a tutti i gruppi Tier 0",
+              "Verificare l'applicazione con Get-ADUserResultantPasswordPolicy",
+              "Forzare il cambio password al primo utilizzo per gli account esistenti"
+            ],
+            "verification": "# Verifica PSO applicata a un utente\nGet-ADUserResultantPasswordPolicy -Identity 'adminuser01' | Select MinPasswordLength, MaxPasswordAge, PasswordHistoryCount\n\n# Lista tutte le PSO\nGet-ADFineGrainedPasswordPolicy -Filter * | Select Name, Precedence, MinPasswordLength, AppliesTo",
+            "considerations": "La PSO con MaxPasswordAge = 0 (nessuna scadenza) è raccomandabile solo se combinata con MFA e monitoraggio attivo. Senza MFA, considerare una scadenza lunga (es. 365 giorni) piuttosto che nessuna.",
+            "signals": "# Tentativi di cambio password falliti per account privilegiati\nindex=windows EventCode=4723 TargetUserName='admin*'\n| stats count by TargetUserName, ComputerName\n| sort -count",
+            "related": ["pa-002", "pa-004", "ia-003"]
+          }
         },
         {
           "id": "pa-002",
-          "title": "Configurare LAPS (Local Administrator Password Solution)",
-          "description": "LAPS gestisce automaticamente le password degli account Administrator locali, rendendo ogni macchina unica. Evita il lateral movement tramite pass-the-hash con password condivise. In ambienti Windows Server 2022+ usare Windows LAPS nativo.",
+          "title": "Configurare LAPS per gli account Administrator locali",
+          "description": "LAPS gestisce automaticamente le password degli account Administrator locali, rendendo ogni macchina unica. In ambienti Windows Server 2022+ usare Windows LAPS nativo.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 5.4"
-        },
-        {
-          "id": "pa-003",
-          "title": "Disabilitare la memorizzazione della password con crittografia reversibile",
-          "description": "L'impostazione 'Store password using reversible encryption' equivale a conservare la password in chiaro. Deve essere disabilitata nella Default Domain Policy e in tutte le PSO.",
-          "severity": "critical",
-          "ref": "CIS AD L1 – 5.2"
-        },
-        {
-          "id": "pa-004",
-          "title": "Configurare la lockout policy (soglia, durata, reset)",
-          "description": "Raccomandato: soglia di blocco 5–10 tentativi, durata blocco 15 minuti, reset contatore 15 minuti. Non impostare durata = 0 (sblocco solo manuale) per evitare DoS.",
-          "severity": "high",
-          "ref": "CIS AD L1 – 5.3"
-        },
-        {
-          "id": "pa-005",
-          "title": "Abilitare MFA per tutti gli account privilegiati",
-          "description": "Implementare autenticazione a più fattori per Domain Admins e tutti gli account Tier 0/Tier 1. Soluzioni compatibili: Microsoft Entra MFA, Duo, hardware token FIDO2.",
-          "severity": "high",
-          "ref": "Microsoft Security Baseline"
+          "ref": "CIS AD L1 – 5.4",
+          "tags": ["laps", "local-admin", "password-management"],
+          "command_quick": "# Verifica LAPS installato\nGet-Module AdmPwd.PS\n\n# Leggi password LAPS di un computer\nGet-AdmPwdPassword -ComputerName 'PC01' | Select ComputerName, Password, ExpirationTimestamp",
+          "command_full": "# Estendi schema AD per LAPS (una tantum)\nUpdate-AdmPwdADSchema\n\n# Configura permessi sull'OU\nSet-AdmPwdComputerSelfPermission -OrgUnit 'OU=Workstations,DC=corp,DC=local'\n\n# Distribuisci LAPS via GPO o software deployment\n# GPO: Computer Config > Admin Templates > LAPS\n# 'Enable local admin password management' → Enabled\n# 'Password Settings' → Lunghezza 20, Complessità 4, Scadenza 30 giorni\n\n# Verifica compliance\nGet-AdmPwdPassword -ComputerName (Get-ADComputer -Filter * | Select -Exp Name) |\n    Where-Object { $_.Password -eq $null } |\n    Select ComputerName",
+          "guidance": {
+            "exposure": "Senza LAPS, l'account Administrator locale ha spesso la stessa password su tutte le macchine — una volta ottenuta su un sistema, l'attaccante può muoversi lateralmente su tutta la rete. Questo è il vettore principale del movimento laterale dopo una compromissione iniziale.",
+            "execution": [
+              "Estendere lo schema AD con Update-AdmPwdADSchema",
+              "Configurare i permessi sulle OU con Set-AdmPwdComputerSelfPermission",
+              "Deployare il client LAPS su tutti i sistemi via GPO o SCCM/Intune",
+              "Configurare la GPO con lunghezza 20 caratteri e scadenza 30 giorni",
+              "Verificare la compliance: tutti i sistemi devono avere una password LAPS registrata"
+            ],
+            "verification": "# Sistemi senza password LAPS (non compliance)\nGet-ADComputer -Filter * -SearchBase 'OU=Workstations,DC=corp,DC=local' |\n    ForEach-Object {\n        $pwd = Get-AdmPwdPassword -ComputerName $_.Name\n        if (-not $pwd.Password) { Write-Warning \"LAPS mancante: $($_.Name)\" }\n    }",
+            "considerations": "In ambienti Windows Server 2022 e Windows 11 22H2+, usare Windows LAPS nativo integrato in AD (non richiede estensione schema separata). Su sistemi joined ad Entra ID, configurare LAPS tramite Intune.",
+            "signals": "# Letture password LAPS (chi ha letto la password di quale macchina)\nindex=windows EventCode=4662 ObjectName='*ms-Mcs-AdmPwd*'\n| table _time, SubjectUserName, ObjectName, ComputerName\n| sort -_time",
+            "related": ["ia-001", "pa-001", "sc-002"]
+          }
         }
       ]
     },
@@ -124,44 +185,49 @@
         {
           "id": "kb-001",
           "title": "Disabilitare NTLM v1 tramite GPO",
-          "description": "NTLMv1 è vulnerabile a attacchi di downgrade e cracking offline. Configurare 'Network security: LAN Manager authentication level' su 'Send NTLMv2 response only. Refuse LM & NTLM'.",
+          "description": "NTLMv1 è vulnerabile a attacchi di downgrade e cracking offline. Configurare 'LAN Manager authentication level' su 'Send NTLMv2 response only. Refuse LM & NTLM'.",
           "severity": "critical",
-          "ref": "CIS Windows L1 – 2.3.11.1"
+          "ref": "CIS Windows L1 – 2.3.11.1",
+          "tags": ["ntlm", "authentication", "protocol-hardening"],
+          "command_quick": "# Verifica impostazione corrente\n(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Lsa' -Name LmCompatibilityLevel).LmCompatibilityLevel\n# 5 = NTLMv2 only (valore corretto)",
+          "command_full": "# Imposta via registry (livello 5 = NTLMv2 only, rifiuta LM e NTLMv1)\nSet-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Lsa' `\n    -Name 'LmCompatibilityLevel' -Value 5 -Type DWord\n\n# Verifica su tutti i DC\n$dcs = Get-ADDomainController -Filter * | Select -Exp HostName\nInvoke-Command -ComputerName $dcs -ScriptBlock {\n    $val = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Lsa' -Name LmCompatibilityLevel).LmCompatibilityLevel\n    [PSCustomObject]@{ Server=$env:COMPUTERNAME; LmCompatLevel=$val; Corretto=($val -ge 5) }\n}",
+          "guidance": {
+            "exposure": "NTLMv1 usa challenge-response a 24 byte facilmente crackabile offline. Strumenti come Responder e Inveigh possono intercettare challenge NTLMv1 e craccarli in pochi secondi su hardware moderno. Anche NTLMv2 è vulnerabile a relay attack, ma NTLMv1 è completamente deprecato e non deve mai essere usato.",
+            "execution": [
+              "Impostare LmCompatibilityLevel = 5 via GPO (Computer Config > Windows Settings > Security Settings > Local Policies > Security Options)",
+              "Applicare prima in modalità audit per identificare sistemi che usano ancora NTLMv1",
+              "Verificare che nessun sistema legacy richieda NTLMv1 prima di applicare la restrizione",
+              "Applicare la GPO prima ai DC, poi ai server, infine alle workstation"
+            ],
+            "verification": "# Verifica su tutti i sistemi del dominio\nGet-ADComputer -Filter * | ForEach-Object {\n    $val = Invoke-Command -ComputerName $_.Name -ScriptBlock {\n        (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Lsa').LmCompatibilityLevel\n    } -ErrorAction SilentlyContinue\n    [PSCustomObject]@{ Computer=$_.Name; LmCompat=$val; OK=($val -ge 5) }\n} | Where-Object { -not $_.OK }",
+            "considerations": "Sistemi Windows XP e applicazioni molto datate possono richiedere NTLMv1. Identificarli con il network audit prima di procedere. In ambienti misti, impostare prima il livello 3 (NTLMv2 + rifiuto LM) e poi salire a 5.",
+            "signals": "# Rilevamento autenticazioni NTLMv1 (Event ID 4624 con AuthPackage=NTLM)\nindex=windows EventCode=4624 AuthenticationPackageName=NTLM\n| eval ntlm_version=if(match(LmPackageName,'NTLM V1'),'v1','v2')\n| where ntlm_version='v1'\n| stats count by TargetUserName, ComputerName, IpAddress\n| sort -count",
+            "related": ["kb-002", "kb-003", "sc-003", "ia-005"]
+          }
         },
         {
           "id": "kb-002",
           "title": "Identificare e mitigare gli account con AS-REP Roasting exposure",
-          "description": "Gli account con 'Do not require Kerberos preauthentication' abilitato sono vulnerabili ad AS-REP Roasting. Eseguire: Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true}. Rimuovere il flag o ruotare le password con lunghezza > 25 caratteri.",
+          "description": "Gli account con 'Do not require Kerberos preauthentication' abilitato sono vulnerabili ad AS-REP Roasting. Rimuovere il flag o usare password > 25 caratteri.",
           "severity": "critical",
-          "ref": "MITRE ATT&CK T1558.004"
-        },
-        {
-          "id": "kb-003",
-          "title": "Identificare e mitigare gli account con Kerberoasting exposure",
-          "description": "Gli account con SPN configurato sono vulnerabili a Kerberoasting. Verificare che gli account di servizio con SPN usino password lunghe (>25 caratteri) o siano migrati a gMSA.",
-          "severity": "critical",
-          "ref": "MITRE ATT&CK T1558.003"
-        },
-        {
-          "id": "kb-004",
-          "title": "Disabilitare la delega Kerberos non vincolata (unconstrained delegation)",
-          "description": "La unconstrained delegation consente a un server di impersonare qualsiasi utente verso qualsiasi servizio. Verificare con: Get-ADComputer -Filter {TrustedForDelegation -eq $true}. Sostituire con constrained delegation o resource-based constrained delegation.",
-          "severity": "critical",
-          "ref": "MITRE ATT&CK T1134.001"
-        },
-        {
-          "id": "kb-005",
-          "title": "Marcare l'account krbtgt come sensibile e ruotare la password periodicamente",
-          "description": "Ruotare la password dell'account krbtgt almeno una volta l'anno (o dopo un incidente). La rotazione deve avvenire due volte consecutive per invalidare tutti i Golden Ticket esistenti. Usare lo script Microsoft Reset-KrbtgtKeyInteractiveWorkflow.",
-          "severity": "high",
-          "ref": "Microsoft Security Advisory"
-        },
-        {
-          "id": "kb-006",
-          "title": "Abilitare il flag 'Account is sensitive and cannot be delegated' per gli account privilegiati",
-          "description": "Abilitare questo flag su tutti gli account Tier 0 e Domain Admins per impedire che le loro credenziali vengano delegate da un server compromesso.",
-          "severity": "high",
-          "ref": "CIS AD L1 – 3.3"
+          "ref": "MITRE ATT&CK T1558.004",
+          "tags": ["kerberos", "as-rep-roasting", "attack-mitigation"],
+          "command_quick": "# Trova account vulnerabili\nGet-ADUser -Filter {DoesNotRequirePreAuth -eq $true} -Properties DoesNotRequirePreAuth | Select Name, SamAccountName",
+          "command_full": "# Audit completo account vulnerabili\nGet-ADUser -Filter {DoesNotRequirePreAuth -eq $true} `\n    -Properties DoesNotRequirePreAuth, LastLogonDate, PasswordLastSet, MemberOf |`\n    Select Name, SamAccountName, LastLogonDate, PasswordLastSet |\n    Format-Table -AutoSize\n\n# Rimuovi il flag su un account\nSet-ADUser -Identity 'svcAccount01' -KerberosEncryptionType AES256 `\n    -Clear DoesNotRequirePreAuth\n\n# Rimuovi il flag su tutti gli account vulnerabili\nGet-ADUser -Filter {DoesNotRequirePreAuth -eq $true} | ForEach-Object {\n    Set-ADAccountControl -Identity $_ -DoesNotRequirePreAuth $false\n    Write-Host \"Fixato: $($_.SamAccountName)\"\n}",
+          "guidance": {
+            "exposure": "AS-REP Roasting permette a un attaccante senza credenziali di richiedere un ticket Kerberos AS-REP per account senza pre-autenticazione. Il ticket contiene materiale crittografato con la password dell'account e può essere craccato offline con hashcat o John the Ripper. Se la password è debole, l'account è compromesso in minuti.",
+            "execution": [
+              "Identificare tutti gli account con DoesNotRequirePreAuth = true",
+              "Valutare se il flag è necessario (raramente lo è)",
+              "Rimuovere il flag con Set-ADAccountControl -DoesNotRequirePreAuth $false",
+              "Se il flag deve rimanere, impostare una password > 25 caratteri casuali",
+              "Monitorare richieste AS-REP anomale con Event ID 4768"
+            ],
+            "verification": "# Verifica: nessun account deve avere il flag attivo\n(Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true}).Count\n# Output atteso: 0",
+            "considerations": "Alcune applicazioni legacy Kerberos potrebbero richiedere questo flag. Verificare con il vendor prima di rimuoverlo. In questi casi, isolare l'account in una OU dedicata con monitoraggio intensivo.",
+            "signals": "# Richieste AS-REP (Event ID 4768 con Pre-Auth type = 0)\nindex=windows EventCode=4768 PreAuthType=0\n| table _time, TargetUserName, IpAddress, Status\n| sort -_time\n\n# Alert se richieste AS-REP fuori orario lavorativo\nindex=windows EventCode=4768 PreAuthType=0\n| eval ora=strftime(_time,'%H')\n| where (ora < 8 OR ora > 20)",
+            "related": ["kb-001", "kb-003", "kb-005"]
+          }
         }
       ]
     },
@@ -172,30 +238,26 @@
         {
           "id": "gp-001",
           "title": "Applicare una baseline GPO ai Domain Controller",
-          "description": "Usare le Microsoft Security Baseline o le CIS Benchmark GPO per i DC. Non modificare la Default Domain Controllers Policy direttamente: creare GPO dedicate con priorità superiore.",
+          "description": "Usare le Microsoft Security Baseline o le CIS Benchmark GPO per i DC. Non modificare la Default Domain Controllers Policy direttamente.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 6.1"
-        },
-        {
-          "id": "gp-002",
-          "title": "Proteggere le GPO sensibili con permissions corrette",
-          "description": "Verificare che solo i gruppi autorizzati abbiano permessi di modifica sulle GPO critiche. Abilitare 'GPO Status' per le GPO inutilizzate. Usare GPMC per l'audit regolare dei permessi.",
-          "severity": "high",
-          "ref": "CIS AD L1 – 6.3"
-        },
-        {
-          "id": "gp-003",
-          "title": "Disabilitare LM hash storage tramite GPO",
-          "description": "Configurare 'Network security: Do not store LAN Manager hash value on next password change' su Enabled. Gli LM hash sono facilmente crackabili anche offline.",
-          "severity": "high",
-          "ref": "CIS Windows L1 – 2.3.11.2"
-        },
-        {
-          "id": "gp-004",
-          "title": "Abilitare Windows Defender Credential Guard",
-          "description": "Credential Guard isola LSASS in un ambiente virtualizzato, impedendo l'estrazione di credenziali tramite Mimikatz e tool simili. Richiede UEFI, Secure Boot e Hyper-V.",
-          "severity": "high",
-          "ref": "Microsoft Security Baseline"
+          "ref": "CIS AD L1 – 6.1",
+          "tags": ["gpo", "baseline", "domain-controller"],
+          "command_quick": "# Elenca GPO applicate ai DC\nGet-GPInheritance -Target 'OU=Domain Controllers,DC=corp,DC=local' | Select -Exp GpoLinks | Select DisplayName, Enabled, Enforced",
+          "command_full": "# Importa Microsoft Security Baseline\n# 1. Scarica da: https://www.microsoft.com/en-us/download/details.aspx?id=55319\n# 2. Estrai e importa\nImport-GPO -BackupGpoName 'MSFT Windows Server 2022 - Domain Controller' `\n    -Path 'C:\\Baselines\\' `\n    -TargetName 'DC-Security-Baseline' `\n    -CreateIfNeeded\n\n# Collega GPO alla OU dei DC (con priorità alta)\nNew-GPLink -Name 'DC-Security-Baseline' `\n    -Target 'OU=Domain Controllers,DC=corp,DC=local' `\n    -Order 1 -Enforced Yes\n\n# Verifica applicazione\ngpresult /r /scope:computer /h C:\\report-gpo.html",
+          "guidance": {
+            "exposure": "I Domain Controller senza baseline GPO sono esposti a decine di impostazioni di sicurezza non ottimali: SMBv1 abilitato, NTLMv1 permesso, audit insufficiente, servizi non necessari attivi. La Microsoft Security Baseline copre oltre 300 impostazioni raccomandate basate su best practice e incidenti reali.",
+            "execution": [
+              "Scaricare le Microsoft Security Baseline per la versione di Windows Server in uso",
+              "Importare la baseline come nuova GPO (non modificare la Default Domain Controllers Policy)",
+              "Testare la GPO in un ambiente di laboratorio prima della produzione",
+              "Collegare la GPO alla OU Domain Controllers con priorità 1",
+              "Verificare con gpresult che tutte le impostazioni siano applicate correttamente"
+            ],
+            "verification": "# Verifica GPO applicate al DC\nInvoke-Command -ComputerName 'DC01' -ScriptBlock {\n    gpresult /r /scope:computer 2>&1\n} | Select-String 'Applied Group Policy'",
+            "considerations": "La Microsoft Security Baseline può causare problemi di compatibilità con applicazioni legacy installate sui DC (pratica sconsigliata ma comune). Testare sempre in lab prima. Alcune impostazioni come SMB signing possono impattare le performance su reti lente.",
+            "signals": "# Modifiche alle GPO sensibili (Event ID 5136)\nindex=windows EventCode=5136 ObjectClass='groupPolicyContainer'\n| table _time, SubjectUserName, ObjectDN, AttributeLDAPDisplayName\n| sort -_time",
+            "related": ["gp-002", "gp-003", "sc-001", "sc-002"]
+          }
         }
       ]
     },
@@ -206,30 +268,26 @@
         {
           "id": "la-001",
           "title": "Abilitare l'audit avanzato sui Domain Controller",
-          "description": "Configurare Advanced Audit Policy tramite GPO: abilitare almeno Account Logon, Account Management, DS Access, Logon/Logoff, Object Access, Policy Change, Privilege Use e System. Non usare la Basic Audit Policy.",
+          "description": "Configurare Advanced Audit Policy tramite GPO. Abilitare almeno Account Logon, Account Management, DS Access, Logon/Logoff, Object Access, Policy Change, Privilege Use e System.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 7.1"
-        },
-        {
-          "id": "la-002",
-          "title": "Centralizzare i log dei DC su un SIEM o log collector",
-          "description": "I log dei DC devono essere inviati in tempo reale a un sistema centralizzato non accessibile dagli amministratori del dominio. Configurare almeno la raccolta degli Event ID critici: 4624, 4625, 4648, 4720, 4728, 4732, 4756, 4768, 4769, 4771.",
-          "severity": "critical",
-          "ref": "CIS AD L1 – 7.3"
-        },
-        {
-          "id": "la-003",
-          "title": "Aumentare la dimensione massima del Security Event Log",
-          "description": "Impostare la dimensione massima del Security log su almeno 1 GB sui DC (default 20 MB è insufficiente). Configurare la policy di retention su 'Overwrite events as needed' o, preferibilmente, archiviare i log prima della rotazione.",
-          "severity": "high",
-          "ref": "CIS Windows L1 – 18.9.26"
-        },
-        {
-          "id": "la-004",
-          "title": "Abilitare il logging di PowerShell (Script Block Logging e Module Logging)",
-          "description": "Configurare tramite GPO: Computer Configuration > Administrative Templates > Windows Components > Windows PowerShell. Abilitare 'Turn on PowerShell Script Block Logging' e 'Turn on Module Logging'. I log finiscono nell'Event Log sotto Microsoft-Windows-PowerShell/Operational.",
-          "severity": "high",
-          "ref": "CIS Windows L1 – 18.9.100"
+          "ref": "CIS AD L1 – 7.1",
+          "tags": ["audit", "logging", "siem", "domain-controller"],
+          "command_quick": "# Verifica policy di audit corrente\nauditpol /get /category:*",
+          "command_full": "# Configura audit avanzato via PowerShell\n$auditSettings = @(\n    @{ Category='Account Logon';      SubCategory='Credential Validation';    Success=$true;  Failure=$true  },\n    @{ Category='Account Management'; SubCategory='User Account Management';  Success=$true;  Failure=$true  },\n    @{ Category='DS Access';          SubCategory='Directory Service Access'; Success=$true;  Failure=$true  },\n    @{ Category='Logon/Logoff';       SubCategory='Logon';                   Success=$true;  Failure=$true  },\n    @{ Category='Logon/Logoff';       SubCategory='Special Logon';           Success=$true;  Failure=$false },\n    @{ Category='Privilege Use';      SubCategory='Sensitive Privilege Use'; Success=$true;  Failure=$true  },\n    @{ Category='Policy Change';      SubCategory='Audit Policy Change';     Success=$true;  Failure=$false }\n)\n\n# Applica via auditpol\nauditpol /set /subcategory:'Credential Validation' /success:enable /failure:enable\nauditpol /set /subcategory:'User Account Management' /success:enable /failure:enable\nauditpol /set /subcategory:'Logon' /success:enable /failure:enable\nauditpol /set /subcategory:'Sensitive Privilege Use' /success:enable /failure:enable\n\n# Verifica\nauditpol /get /category:* | Where-Object { $_ -match 'Success|Failure' }",
+          "guidance": {
+            "exposure": "Senza audit avanzato, attività critiche come creazione di account, modifiche ai gruppi privilegiati, logon falliti e accesso a oggetti sensibili non vengono registrate. In caso di incidente, la mancanza di log rende impossibile la forensic analysis e il rispetto dei requisiti di compliance (GDPR, NIS2, ISO 27001).",
+            "execution": [
+              "Verificare la policy corrente con auditpol /get /category:*",
+              "Configurare Advanced Audit Policy tramite GPO dedicata per i DC",
+              "Abilitare Success e Failure per le subcategorie critiche",
+              "Aumentare la dimensione del Security Event Log ad almeno 1 GB",
+              "Configurare l'inoltro dei log a un SIEM o log collector centralizzato"
+            ],
+            "verification": "# Verifica che le subcategorie critiche siano abilitate\nauditpol /get /subcategory:'Credential Validation','User Account Management','Logon','Sensitive Privilege Use'\n# Tutti devono mostrare 'Success and Failure'",
+            "considerations": "L'audit avanzato genera un volume significativo di eventi. Pianificare la capacità di storage e la larghezza di banda per l'inoltro al SIEM prima di abilitare tutto. Iniziare con le subcategorie più critiche e aggiungerne gradualmente.",
+            "signals": "# Event ID critici da monitorare sempre\n# 4624 - Logon riuscito\n# 4625 - Logon fallito\n# 4648 - Logon con credenziali esplicite\n# 4720 - Account creato\n# 4728/4732/4756 - Aggiunta a gruppo privilegiato\n# 4768/4769/4771 - Ticket Kerberos\n# 4776 - Autenticazione NTLM\n\nindex=windows EventCode IN (4624,4625,4648,4720,4728,4732,4756,4768,4769,4771,4776)\n| stats count by EventCode, ComputerName\n| sort -count",
+            "related": ["la-002", "la-003", "la-004"]
+          }
         }
       ]
     },
@@ -240,37 +298,26 @@
         {
           "id": "sc-001",
           "title": "Abilitare LDAP signing e LDAP channel binding",
-          "description": "Senza LDAP signing, un attaccante può eseguire relay LDAP. Configurare 'Domain controller: LDAP server signing requirements' su 'Require signing'. Abilitare anche LDAP channel binding (KB4520412).",
+          "description": "Senza LDAP signing, un attaccante può eseguire relay LDAP. Configurare 'LDAP server signing requirements' su 'Require signing' e abilitare LDAP channel binding.",
           "severity": "critical",
-          "ref": "Microsoft Security Advisory ADV190023"
-        },
-        {
-          "id": "sc-002",
-          "title": "Disabilitare SMBv1 su tutti i sistemi",
-          "description": "SMBv1 è vulnerabile a EternalBlue (MS17-010) e non supporta moderne funzionalità di sicurezza. Disabilitare tramite GPO e PowerShell: Set-SmbServerConfiguration -EnableSMB1Protocol $false.",
-          "severity": "critical",
-          "ref": "CIS Windows L1 – 18.3.3"
-        },
-        {
-          "id": "sc-003",
-          "title": "Abilitare SMB signing obbligatorio",
-          "description": "Senza SMB signing è possibile eseguire attacchi NTLM relay. Configurare 'Microsoft network server: Digitally sign communications (always)' su Enabled per DC e server critici.",
-          "severity": "critical",
-          "ref": "CIS Windows L1 – 2.3.9.2"
-        },
-        {
-          "id": "sc-004",
-          "title": "Disabilitare il servizio Print Spooler sui Domain Controller",
-          "description": "Il servizio Print Spooler è stato sfruttato in PrintNightmare (CVE-2021-1675) e in attacchi di coercizione dell'autenticazione. Non è necessario sui DC e deve essere disabilitato.",
-          "severity": "critical",
-          "ref": "CVE-2021-1675 / PrintNightmare"
-        },
-        {
-          "id": "sc-005",
-          "title": "Limitare i protocolli legacy: disabilitare WDigest",
-          "description": "WDigest causa la memorizzazione delle password in chiaro nella memoria di LSASS, facilitando l'estrazione con Mimikatz. Disabilitare tramite registry: HKLM\\SYSTEM\\CurrentControlSet\\Control\\SecurityProviders\\WDigest → UseLogonCredential = 0.",
-          "severity": "high",
-          "ref": "Microsoft KB2871997"
+          "ref": "Microsoft Security Advisory ADV190023",
+          "tags": ["ldap", "signing", "relay-attack", "domain-controller"],
+          "command_quick": "# Verifica impostazione LDAP signing\n(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\NTDS\\Parameters' -Name 'LDAPServerIntegrity').LDAPServerIntegrity\n# 2 = Require signing (valore corretto)",
+          "command_full": "# Imposta LDAP signing via registry\nSet-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\NTDS\\Parameters' `\n    -Name 'LDAPServerIntegrity' -Value 2 -Type DWord\n\n# Imposta LDAP channel binding\nSet-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\NTDS\\Parameters' `\n    -Name 'LdapEnforceChannelBinding' -Value 2 -Type DWord\n\n# Verifica via GPO\n# Computer Config > Windows Settings > Security Settings > Local Policies > Security Options\n# 'Domain controller: LDAP server signing requirements' → Require signing\n\n# Audit prima di forzare: conta connessioni LDAP non firmate\n# Controlla Event ID 2889 nel log NTDS\\Diagnostic",
+          "guidance": {
+            "exposure": "Senza LDAP signing, un attaccante in posizione man-in-the-middle può intercettare e modificare le query LDAP. Con NTLM relay + LDAP unsigned, è possibile creare account AD, aggiungere utenti a gruppi privilegiati o modificare ACL — tutto senza conoscere una sola password. Questo vettore è stato usato in numerosi attacchi reali incluso NotPetya.",
+            "execution": [
+              "Prima di forzare, abilitare l'audit delle connessioni LDAP non firmate (Event ID 2889)",
+              "Identificare applicazioni che usano LDAP senza signing e aggiornarle",
+              "Impostare 'LDAP server signing requirements' = 'Require signing' via GPO",
+              "Abilitare LDAP channel binding (KB4520412)",
+              "Monitorare Event ID 2889 nelle prime settimane per identificare client non conformi"
+            ],
+            "verification": "# Verifica impostazioni su tutti i DC\nGet-ADDomainController -Filter * | ForEach-Object {\n    $signing = Invoke-Command -ComputerName $_.Name -ScriptBlock {\n        (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\NTDS\\Parameters').LDAPServerIntegrity\n    }\n    [PSCustomObject]@{ DC=$_.Name; LDAPSigning=$signing; Corretto=($signing -eq 2) }\n}",
+            "considerations": "Applicazioni come alcuni prodotti VMware, copier/scanner di rete e applicazioni custom usano LDAP senza signing. Prima di abilitare 'Require signing', identificare tutti i client LDAP nella rete con Event ID 2889. Le applicazioni non compatibili devono essere aggiornate o migrate a LDAPS (TCP 636).",
+            "signals": "# Client LDAP che si connettono senza signing (Event ID 2889)\nGet-WinEvent -LogName 'Directory Service' -FilterXPath \"*[System[EventID=2889]]\"\n| ForEach-Object { $_.Message } | Select -First 20\n\n# In Splunk\nindex=windows EventCode=2889\n| rex field=Message 'IP address of the client (?P<client_ip>[\\d\\.]+)'\n| stats count by client_ip\n| sort -count",
+            "related": ["sc-002", "sc-003", "gp-001"]
+          }
         }
       ]
     },
@@ -281,23 +328,26 @@
         {
           "id": "pt-001",
           "title": "Mantenere i Domain Controller aggiornati con le patch di sicurezza",
-          "description": "Applicare le patch di sicurezza Microsoft entro 30 giorni dal rilascio per le criticità medie, entro 7 giorni per le critiche. Testare in ambiente di pre-produzione prima di applicare ai DC di produzione.",
+          "description": "Applicare le patch di sicurezza Microsoft entro 30 giorni per le criticità medie, entro 7 giorni per le critiche. Testare sempre in pre-produzione.",
           "severity": "critical",
-          "ref": "CIS AD L1 – 8.1"
-        },
-        {
-          "id": "pt-002",
-          "title": "Verificare che i Domain Controller non eseguano sistemi operativi fuori supporto",
-          "description": "I sistemi fuori supporto non ricevono più patch di sicurezza. Pianificare la migrazione prima dell'end-of-life. Stato attuale: Windows Server 2012/R2 è giunto a fine supporto esteso (ottobre 2023).",
-          "severity": "critical",
-          "ref": "Microsoft Lifecycle Policy"
-        },
-        {
-          "id": "pt-003",
-          "title": "Pianificare e testare il processo di ripristino dei Domain Controller",
-          "description": "Eseguire backup regolari dello stato del sistema (System State Backup) su tutti i DC. Testare il ripristino almeno annualmente in ambiente isolato. Documentare il processo di disaster recovery.",
-          "severity": "high",
-          "ref": "Best practice Microsoft AD"
+          "ref": "CIS AD L1 – 8.1",
+          "tags": ["patching", "vulnerability-management", "domain-controller"],
+          "command_quick": "# Verifica aggiornamenti mancanti\nGet-HotFix | Sort-Object InstalledOn -Descending | Select -First 10\n\n# Verifica con WSUS/WUA\n(New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().Search('IsInstalled=0').Updates | Select Title",
+          "command_full": "# Audit patch su tutti i DC\n$dcs = Get-ADDomainController -Filter * | Select -Exp HostName\nInvoke-Command -ComputerName $dcs -ScriptBlock {\n    $lastPatch = (Get-HotFix | Sort-Object InstalledOn -Descending | Select -First 1)\n    $pending   = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().Search('IsInstalled=0 AND Type=\\'Software\\'').Updates.Count\n    [PSCustomObject]@{\n        DC            = $env:COMPUTERNAME\n        UltimaPath    = $lastPatch.InstalledOn\n        PatchMancanti = $pending\n    }\n}",
+          "guidance": {
+            "exposure": "I Domain Controller non aggiornati sono vulnerabili a exploit pubblicamente disponibili. CVE critiche come ZeroLogon (CVE-2020-1472), PrintNightmare (CVE-2021-1675) e noPac (CVE-2021-42278) consentono la compromissione completa del dominio in pochi minuti. Il tempo medio di exploit dopo il rilascio di una patch critica è sceso sotto le 48 ore.",
+            "execution": [
+              "Configurare WSUS o Microsoft Update per approvazione automatica delle patch critiche",
+              "Definire una maintenance window mensile per i DC (es. secondo martedì del mese + 1 settimana)",
+              "Testare le patch in ambiente di pre-produzione per almeno 48 ore",
+              "Applicare prima su DC secondari, poi sul PDC Emulator",
+              "Verificare la replica AD dopo ogni aggiornamento"
+            ],
+            "verification": "# Verifica replica AD dopo patching\nRepadmin /replsummary\nRepadmin /showrepl\n\n# Verifica servizi NETLOGON e ADWS dopo riavvio\nGet-Service -Name NETLOGON, 'Active Directory Web Services' | Select Name, Status",
+            "considerations": "Non riavviare tutti i DC contemporaneamente. Mantenere sempre almeno un DC online durante il patching. Verificare che il FSMO PDC Emulator sia patchato per ultimo. In caso di patch problematica, avere un piano di rollback documentato.",
+            "signals": "# Sistemi non aggiornati da più di 30 giorni (richiede SCCM/Intune o script custom)\n# Alternativa: monitorare Event ID 19 (aggiornamento installato) e 20 (fallimento)\nindex=windows EventCode IN (19,20) source='WinEventLog:System' Source='Microsoft-Windows-WindowsUpdateClient'\n| stats max(_time) as ultimo_update by ComputerName\n| eval giorni_fa=round((now()-ultimo_update)/86400,0)\n| where giorni_fa > 30\n| sort -giorni_fa",
+            "related": ["pt-002", "sc-004"]
+          }
         }
       ]
     }
