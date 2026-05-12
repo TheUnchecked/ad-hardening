@@ -6,50 +6,60 @@
   <title>AD Hardening — TheUnchecked</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="assets/css/style.css" />
 </head>
 <body>
 
-  <!-- SIDEBAR -->
-  <aside class="sidebar" id="sidebar">
-    <div class="sidebar-header">
-      <span class="sidebar-logo">⬡</span>
-      <span class="sidebar-title">AD Hardening</span>
+  <!-- ── scan-line overlay ── -->
+  <div class="scanlines"></div>
+
+  <!-- ══════════════════════════════════════════════════════ HEADER -->
+  <header class="topbar">
+    <div class="topbar__brand">
+      <span class="topbar__logo">&lt;/&gt;</span>
+      <h1 class="topbar__title">AD Hardening <span class="topbar__sep">—</span> TheUnchecked</h1>
     </div>
-    <nav class="sidebar-nav">
-      <span class="nav-label">Categorie</span>
-      <ul id="category-nav"></ul>
-    </nav>
-  </aside>
+    <div class="topbar__actions">
+      <button id="btn-menu" class="topbar__menu-btn" aria-label="Menu">&#9776;</button>
+    </div>
+  </header>
 
-  <!-- TOGGLE SIDEBAR MOBILE -->
-  <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Menu">☰</button>
+  <!-- ══════════════════════════════════════════════════════ LAYOUT -->
+  <div class="layout">
 
-  <!-- MAIN -->
-  <main class="main">
+    <!-- ── sidebar ── -->
+    <aside id="sidebar" class="sidebar">
+      <nav class="sidebar__nav" id="sidebar-nav"></nav>
+    </aside>
 
-    <header class="page-header">
-      <h1>Active Directory<br /><span>Best Practices</span></h1>
-      <p class="page-subtitle">Best practice per l'hardening di Active Directory on-premises</p>
+    <!-- ── main ── -->
+    <main class="main">
 
-      <div class="toolbar">
-        <div class="search-wrap">
-          <input type="text" id="search-input" placeholder="Cerca controllo…" autocomplete="off" />
+      <!-- filters -->
+      <section class="filters">
+        <div class="filters__pills" id="severity-pills">
+          <button class="pill pill--critical active" data-severity="critical">Critico</button>
+          <button class="pill pill--high active"     data-severity="high">Alto</button>
+          <button class="pill pill--medium active"   data-severity="medium">Medio</button>
+          <button class="pill pill--low active"      data-severity="low">Basso</button>
         </div>
-        <div class="filter-wrap">
-          <button class="filter-btn active" data-severity="all">Tutti</button>
-          <button class="filter-btn" data-severity="critical">🔴 Critico</button>
-          <button class="filter-btn" data-severity="high">🟠 Alto</button>
-          <button class="filter-btn" data-severity="medium">🟡 Medio</button>
-          <button class="filter-btn" data-severity="low">🟢 Basso</button>
+        <div class="filters__search">
+          <svg class="filters__search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="search-input" class="filters__input" placeholder="Cerca..." />
         </div>
-      </div>
-    </header>
+      </section>
 
-    <div id="content" class="content"></div>
+      <!-- checklist container -->
+      <div id="checklist" class="checklist"></div>
 
-  </main>
+    </main>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ FOOTER -->
+  <footer class="footer">
+    <span>&copy; 2026 TheUnchecked — AD Hardening Checklist</span>
+  </footer>
 
   <script src="assets/js/app.js"></script>
 </body>
