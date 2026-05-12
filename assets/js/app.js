@@ -1,255 +1,321 @@
-/* ================================================
-   AD HARDENING — app.js
-   ================================================ */
+/* ═══════════════════════════════════════════════════════════
+   AD Hardening — TheUnchecked  |  Cyber HUD  |  app.js
+   ═══════════════════════════════════════════════════════════ */
 
-let allItems       = [];
-let activeFilter   = 'all';
-let activeCategory = null;
+(function () {
+  'use strict';
 
-// ── CARICAMENTO DATI ──────────────────────────────
-async function loadData() {
-  const res  = await fetch('data/checklist.json');
-  const data = await res.json();
-  allItems = data.categories;
-  buildNav();
-  render();
-}
+  /* ── DOM refs ── */
+  const sidebarNav    = document.getElementById('sidebar-nav');
+  const checklistEl   = document.getElementById('checklist');
+  const searchInput   = document.getElementById('search-input');
+  const severityPills = document.querySelectorAll('.pill[data-severity]');
+  const sidebar       = document.getElementById('sidebar');
+  const menuBtn       = document.getElementById('btn-menu');
 
-// ── SIDEBAR NAV ───────────────────────────────────
-function buildNav() {
-  const ul = document.getElementById('category-nav');
-  ul.innerHTML = '';
+  let DATA = null; // loaded checklist
 
-  const liAll = document.createElement('li');
-  liAll.innerHTML = `<a href="#" class="${activeCategory === null ? 'active' : ''}">
-    <span>Tutte le categorie</span>
-    <span class="nav-count">${allItems.reduce((a,c) => a + c.items.length, 0)}</span>
-  </a>`;
-  liAll.querySelector('a').addEventListener('click', e => { e.preventDefault(); setCategory(null); });
-  ul.appendChild(liAll);
-
-  allItems.forEach(cat => {
-    const li = document.createElement('li');
-    li.innerHTML = `<a href="#cat-${cat.id}" class="${activeCategory === cat.id ? 'active' : ''}">
-      <span>${cat.name}</span>
-      <span class="nav-count">${cat.items.length}</span>
-    </a>`;
-    li.querySelector('a').addEventListener('click', e => {
-      e.preventDefault();
-      setCategory(cat.id);
-      document.getElementById('cat-' + cat.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  /* ══════════════ LOAD DATA ══════════════ */
+  fetch('data/checklist.json')
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(d => { DATA = d; init(); })
+    .catch(e => {
+      checklistEl.innerHTML =
+        '<p style="color:var(--critical)">Errore nel caricamento di checklist.json: ' + e.message + '</p>';
     });
-    ul.appendChild(li);
-  });
-}
 
-function setCategory(id) {
-  activeCategory = id;
-  buildNav();
-  render();
-}
-
-// ── RENDER ────────────────────────────────────────
-function render() {
-  const content = document.getElementById('content');
-  const query   = document.getElementById('search-input').value.toLowerCase().trim();
-  content.innerHTML = '';
-
-  const categories = activeCategory
-    ? allItems.filter(c => c.id === activeCategory)
-    : allItems;
-
-  categories.forEach(cat => {
-    let items = cat.items;
-    if (activeFilter !== 'all') items = items.filter(i => i.severity === activeFilter);
-    if (query) items = items.filter(i =>
-      i.title.toLowerCase().includes(query) ||
-      (i.description || '').toLowerCase().includes(query) ||
-      (i.tags || []).some(t => t.includes(query))
-    );
-    if (!items.length) return;
-
-    const section = document.createElement('section');
-    section.className = 'section';
-    section.id = 'cat-' + cat.id;
-    section.innerHTML = `
-      <div class="section-header">
-        <h2 class="section-title">${cat.name}</h2>
-        <span class="section-count">${items.length} controlli</span>
-      </div>
-      <div class="checklist" id="list-${cat.id}"></div>
-    `;
-    const list = section.querySelector('.checklist');
-    items.forEach(item => list.appendChild(buildCard(item)));
-    content.appendChild(section);
-  });
-
-  if (!content.innerHTML) {
-    content.innerHTML = `<div class="empty-state"><p>Nessun controllo trovato.</p></div>`;
+  /* ══════════════ INIT ══════════════ */
+  function init () {
+    renderSidebar();
+    renderChecklist();
+    bindFilters();
+    bindMenu();
+    observeSections();
   }
-}
 
-// ── CARD ──────────────────────────────────────────
-function buildCard(item) {
-  const wrap = document.createElement('div');
-  wrap.className = 'card';
-  wrap.dataset.id = item.id;
+  /* ══════════════ SIDEBAR ══════════════ */
+  function renderSidebar () {
+    sidebarNav.innerHTML = '';
+    DATA.categories.forEach((cat, i) => {
+      const num = String(i + 1).padStart(2, '0');
+      const count = cat.items ? cat.items.length : 0;
+      const a = document.createElement('a');
+      a.className = 'sidebar__link';
+      a.href = '#cat-' + cat.id;
+      a.dataset.cat = cat.id;
+      a.innerHTML =
+        '<span class="sidebar__num">' + num + '</span>' +
+        '<span>' + cat.name + '</span>' +
+        '<span class="sidebar__badge">' + count + '</span>';
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        const target = document.getElementById('cat-' + cat.id);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // close mobile sidebar
+        sidebar.classList.remove('open');
+      });
+      sidebarNav.appendChild(a);
+    });
+  }
 
-  const hasQuick = item.command_quick?.trim();
-  const hasFull  = item.command_full?.trim();
-  const hasGuid  = item.guidance;
-  const tags     = (item.tags || []).map(t => `<span class="tag">${t}</span>`).join('');
+  /* ══════════════ CHECKLIST ══════════════ */
+  function renderChecklist () {
+    const activeSeverities = getActiveSeverities();
+    const query = searchInput.value.trim().toLowerCase();
 
-  wrap.innerHTML = `
-    <div class="card-header">
-      <div class="card-main">
-        <div class="card-title">${item.title}</div>
-        <div class="card-desc">${item.description}</div>
-        <div class="card-meta">
-          <span class="badge badge-${item.severity}">${labelSev(item.severity)}</span>
-          ${item.ref ? `<span class="card-ref">${item.ref}</span>` : ''}
-        </div>
-        ${tags ? `<div class="card-tags">${tags}</div>` : ''}
-      </div>
-      ${hasGuid ? `<button class="btn-detail" title="Elite Guidance">⚡ Elite Guidance</button>` : ''}
-    </div>
+    checklistEl.innerHTML = '';
 
-    ${hasQuick ? `
-    <div class="cmd-block">
-      <div class="cmd-label">Comando rapido <button class="btn-copy-cmd" data-target="quick-${item.id}">copia</button></div>
-      <pre id="quick-${item.id}" class="cmd-pre">${escHtml(item.command_quick)}</pre>
-      ${hasFull ? `<button class="btn-expand-cmd" data-id="${item.id}">▸ Mostra comando completo</button>` : ''}
-    </div>` : ''}
+    DATA.categories.forEach(cat => {
+      const items = (cat.items || []).filter(item => {
+        if (!activeSeverities.includes(item.severity)) return false;
+        if (query) {
+          const haystack = (item.title + ' ' + item.description + ' ' + (item.tags || []).join(' ')).toLowerCase();
+          if (!haystack.includes(query)) return false;
+        }
+        return true;
+      });
 
-    ${hasFull ? `
-    <div class="cmd-block cmd-full" id="full-block-${item.id}" style="display:none">
-      <div class="cmd-label">Comando completo <button class="btn-copy-cmd" data-target="full-${item.id}">copia</button></div>
-      <pre id="full-${item.id}" class="cmd-pre">${escHtml(item.command_full)}</pre>
-    </div>` : ''}
+      // always show section anchor (for sidebar scroll), hide if empty
+      const section = document.createElement('section');
+      section.className = 'cat-section';
+      section.id = 'cat-' + cat.id;
 
-    ${hasGuid ? `
-    <div class="guidance-panel" id="guid-${item.id}" style="display:none">
-      ${guidanceHtml(item)}
-    </div>` : ''}
-  `;
+      if (items.length === 0) {
+        section.style.display = 'none';
+        checklistEl.appendChild(section);
+        return;
+      }
 
-  // Espandi comando completo
-  wrap.querySelector('.btn-expand-cmd')?.addEventListener('click', function() {
-    const fb = document.getElementById('full-block-' + this.dataset.id);
-    const open = fb.style.display === 'none';
-    fb.style.display = open ? '' : 'none';
-    this.textContent = open ? '▾ Nascondi comando completo' : '▸ Mostra comando completo';
-  });
+      const h2 = document.createElement('h2');
+      h2.className = 'cat-section__title';
+      h2.textContent = cat.name;
+      section.appendChild(h2);
 
-  // Elite Guidance
-  wrap.querySelector('.btn-detail')?.addEventListener('click', function() {
-    const panel = document.getElementById('guid-' + item.id);
-    const open  = panel.style.display === 'none';
-    panel.style.display = open ? '' : 'none';
-    this.textContent = open ? '✕ Chiudi' : '⚡ Elite Guidance';
-  });
+      items.forEach(item => section.appendChild(buildCard(item)));
+      checklistEl.appendChild(section);
+    });
 
-  // Copia comandi
-  wrap.querySelectorAll('.btn-copy-cmd').forEach(btn => {
-    btn.addEventListener('click', function() {
-      const pre = document.getElementById(this.dataset.target);
-      navigator.clipboard.writeText(pre.textContent).then(() => {
-        const orig = this.textContent;
-        this.textContent = '✓';
-        setTimeout(() => this.textContent = orig, 1500);
+    // update sidebar badges with visible counts
+    DATA.categories.forEach(cat => {
+      const badge = sidebarNav.querySelector('[data-cat="' + cat.id + '"] .sidebar__badge');
+      if (!badge) return;
+      const sec = document.getElementById('cat-' + cat.id);
+      const count = sec ? sec.querySelectorAll('.card').length : 0;
+      badge.textContent = count;
+    });
+  }
+
+  /* ══════════════ BUILD CARD ══════════════ */
+  function buildCard (item) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.severity = item.severity;
+
+    // ── header ──
+    let html = '<div class="card__header">';
+    html += '<span class="card__id">' + esc(item.id) + '</span>';
+    html += '<span class="card__title">' + esc(item.title) + '</span>';
+    html += '<span class="badge badge--' + item.severity + '">' + esc(item.severity) + '</span>';
+    html += '</div>';
+
+    if (item.ref) html += '<div class="card__ref">' + esc(item.ref) + '</div>';
+    if (item.description) html += '<div class="card__desc">' + esc(item.description) + '</div>';
+
+    // tags
+    if (item.tags && item.tags.length) {
+      html += '<div class="card__tags">';
+      item.tags.forEach(t => { html += '<span class="tag">' + esc(t) + '</span>'; });
+      html += '</div>';
+    }
+
+    // quick command
+    if (item.command_quick) {
+      html += codeBlock('Comando Rapido', item.command_quick, true);
+    }
+
+    // action buttons
+    html += '<div class="card__actions">';
+    if (item.guidance) html += '<button class="btn btn--accent js-toggle-guidance">⚡ Elite Guidance</button>';
+    if (item.command_full) html += '<button class="btn js-toggle-full">Comando Completo</button>';
+    html += '</div>';
+
+    // full command (hidden)
+    if (item.command_full) {
+      html += '<div class="full-cmd" style="display:none">';
+      html += codeBlock('Comando Completo', item.command_full, false);
+      html += '</div>';
+    }
+
+    // guidance panel (hidden)
+    if (item.guidance) {
+      html += buildGuidance(item.guidance);
+    }
+
+    card.innerHTML = html;
+
+    // ── wire events ──
+    const guidanceBtn = card.querySelector('.js-toggle-guidance');
+    const guidancePanel = card.querySelector('.guidance');
+    if (guidanceBtn && guidancePanel) {
+      guidanceBtn.addEventListener('click', () => guidancePanel.classList.toggle('open'));
+    }
+
+    const fullBtn = card.querySelector('.js-toggle-full');
+    const fullDiv = card.querySelector('.full-cmd');
+    if (fullBtn && fullDiv) {
+      fullBtn.addEventListener('click', () => {
+        const open = fullDiv.style.display !== 'none';
+        fullDiv.style.display = open ? 'none' : 'block';
+        fullBtn.textContent = open ? 'Comando Completo' : 'Nascondi Completo';
+      });
+    }
+
+    // copy buttons
+    card.querySelectorAll('.btn-copy').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const code = btn.closest('.code-wrap').querySelector('.code-content').textContent;
+        navigator.clipboard.writeText(code).then(() => {
+          btn.textContent = '✓ Copiato';
+          btn.classList.add('copied');
+          setTimeout(() => { btn.textContent = 'Copia'; btn.classList.remove('copied'); }, 1500);
+        });
       });
     });
-  });
 
-  return wrap;
-}
+    // guidance tabs
+    card.querySelectorAll('.guidance__tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const panel = tab.closest('.guidance');
+        panel.querySelectorAll('.guidance__tab').forEach(t => t.classList.remove('active'));
+        panel.querySelectorAll('.guidance__panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        panel.querySelector('.guidance__panel[data-panel="' + tab.dataset.tab + '"]').classList.add('active');
+      });
+    });
 
-// ── GUIDANCE HTML ────────────────────────────────
-function guidanceHtml(item) {
-  const g = item.guidance;
-  if (!g) return '';
-
-  const related = (g.related || []).map(id => {
-    const found = findItem(id);
-    return found
-      ? `<span class="rel-tag" data-id="${id}">${id}: ${found.title}</span>`
-      : `<span class="rel-tag">${id}</span>`;
-  }).join('');
-
-  const steps = (g.execution || []).map((s, i) =>
-    `<li>${i + 1}. ${s}</li>`
-  ).join('');
-
-  return `
-    <div class="guid-section">
-      <div class="guid-title">☠ Real-World Exposure</div>
-      <p class="guid-text">${g.exposure || '—'}</p>
-    </div>
-    ${steps ? `
-    <div class="guid-section">
-      <div class="guid-title">⚙ Practical Execution</div>
-      <ul class="guid-steps">${steps}</ul>
-    </div>` : ''}
-    ${g.verification ? `
-    <div class="guid-section">
-      <div class="guid-title">✔ Verification</div>
-      <pre class="cmd-pre">${escHtml(g.verification)}</pre>
-    </div>` : ''}
-    ${g.considerations ? `
-    <div class="guid-section">
-      <div class="guid-title">⚠ Considerations</div>
-      <p class="guid-text">${g.considerations}</p>
-    </div>` : ''}
-    ${g.signals ? `
-    <div class="guid-section">
-      <div class="guid-title">◎ Operational Signals</div>
-      <pre class="cmd-pre">${escHtml(g.signals)}</pre>
-    </div>` : ''}
-    ${related ? `
-    <div class="guid-section">
-      <div class="guid-title">⇢ Related Items</div>
-      <div class="rel-tags">${related}</div>
-    </div>` : ''}
-  `;
-}
-
-// ── UTILITY ───────────────────────────────────────
-function findItem(id) {
-  for (const cat of allItems) {
-    const found = cat.items.find(i => i.id === id);
-    if (found) return found;
+    return card;
   }
-  return null;
-}
 
-function escHtml(str) {
-  return (str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
+  /* ══════════════ CODE BLOCK HTML ══════════════ */
+  function codeBlock (label, code, isQuick) {
+    const lines = code.split('\n');
+    let html = '<div class="code-wrap' + (isQuick ? ' code-quick' : '') + '">';
+    html += '<div class="code-header"><span class="code-header__label">' + label + '</span>';
+    html += '<button class="btn-copy">Copia</button></div>';
+    html += '<div class="code-body">';
+    if (!isQuick) {
+      html += '<div class="code-lines">';
+      lines.forEach((_, i) => { html += '<span>' + (i + 1) + '</span>'; });
+      html += '</div>';
+    }
+    html += '<div class="code-content">' + esc(code) + '</div>';
+    html += '</div></div>';
+    return html;
+  }
 
-function labelSev(s) {
-  return { critical: 'Critico', high: 'Alto', medium: 'Medio', low: 'Basso' }[s] || s;
-}
+  /* ══════════════ GUIDANCE PANEL HTML ══════════════ */
+  function buildGuidance (g) {
+    const tabs = [
+      { key: 'exposure',       label: 'Impatto' },
+      { key: 'execution',      label: 'Esecuzione' },
+      { key: 'verification',   label: 'Verifica' },
+      { key: 'considerations', label: 'Considerazioni' },
+      { key: 'signals',        label: 'Segnali' },
+      { key: 'related',        label: 'Correlati' }
+    ];
 
-// ── SEARCH ────────────────────────────────────────
-document.getElementById('search-input').addEventListener('input', () => render());
+    // keep only tabs that have content
+    const available = tabs.filter(t => {
+      const v = g[t.key];
+      return v && (Array.isArray(v) ? v.length > 0 : String(v).trim() !== '');
+    });
+    if (available.length === 0) return '';
 
-// ── FILTRI ────────────────────────────────────────
-document.querySelectorAll('.filter-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    activeFilter = btn.dataset.severity;
-    render();
-  });
-});
+    let html = '<div class="guidance">';
+    html += '<div class="guidance__tabs">';
+    available.forEach((t, i) => {
+      html += '<button class="guidance__tab' + (i === 0 ? ' active' : '') + '" data-tab="' + t.key + '">' + t.label + '</button>';
+    });
+    html += '</div><div class="guidance__panels">';
 
-// ── SIDEBAR MOBILE ────────────────────────────────
-document.getElementById('sidebar-toggle').addEventListener('click', () => {
-  document.getElementById('sidebar').classList.toggle('open');
-});
+    available.forEach((t, i) => {
+      html += '<div class="guidance__panel' + (i === 0 ? ' active' : '') + '" data-panel="' + t.key + '">';
+      const val = g[t.key];
+      if (Array.isArray(val)) {
+        html += '<ul>';
+        val.forEach(v => { html += '<li>' + esc(String(v)) + '</li>'; });
+        html += '</ul>';
+      } else {
+        // if it looks like code (starts with # or contains \n with commands)
+        if (String(val).includes('\n') || String(val).trim().startsWith('#')) {
+          html += '<div class="code-wrap code-quick" style="margin:0"><div class="code-header"><span class="code-header__label">' + t.label + '</span><button class="btn-copy">Copia</button></div><div class="code-body"><div class="code-content">' + esc(String(val)) + '</div></div></div>';
+        } else {
+          html += '<p>' + esc(String(val)) + '</p>';
+        }
+      }
+      html += '</div>';
+    });
+    html += '</div></div>';
+    return html;
+  }
 
-// ── AVVIO ─────────────────────────────────────────
-loadData();
+  /* ══════════════ FILTERS ══════════════ */
+  function bindFilters () {
+    severityPills.forEach(pill => {
+      pill.addEventListener('click', () => {
+        pill.classList.toggle('active');
+        renderChecklist();
+      });
+    });
+    searchInput.addEventListener('input', debounce(renderChecklist, 200));
+  }
+
+  function getActiveSeverities () {
+    return Array.from(severityPills)
+      .filter(p => p.classList.contains('active'))
+      .map(p => p.dataset.severity);
+  }
+
+  /* ══════════════ MOBILE MENU ══════════════ */
+  function bindMenu () {
+    menuBtn.addEventListener('click', () => sidebar.classList.toggle('open'));
+    // close when clicking outside
+    document.addEventListener('click', e => {
+      if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && e.target !== menuBtn) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+
+  /* ══════════════ INTERSECTION OBSERVER (active sidebar link) ══════════════ */
+  function observeSections () {
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const id = entry.target.id.replace('cat-', '');
+          sidebarNav.querySelectorAll('.sidebar__link').forEach(l => l.classList.remove('active'));
+          const active = sidebarNav.querySelector('[data-cat="' + id + '"]');
+          if (active) active.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-20% 0px -60% 0px' });
+
+    // observe after first render
+    setTimeout(() => {
+      document.querySelectorAll('.cat-section').forEach(s => observer.observe(s));
+    }, 100);
+  }
+
+  /* ══════════════ UTILS ══════════════ */
+  function esc (s) {
+    const d = document.createElement('div');
+    d.appendChild(document.createTextNode(s));
+    return d.innerHTML;
+  }
+
+  function debounce (fn, ms) {
+    let t;
+    return function () { clearTimeout(t); t = setTimeout(fn, ms); };
+  }
+
+})();
