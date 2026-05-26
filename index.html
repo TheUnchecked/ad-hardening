@@ -6,61 +6,551 @@
   <title>AD Hardening — TheUnchecked</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="assets/css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600;700&family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    /* ══════════════════════════════════════════
+       FROST OPS — AD Hardening Checklist
+       Design: deep navy + glassmorphism + cyan
+    ══════════════════════════════════════════ */
+    :root {
+      --bg:#0a0e1a;--glass:rgba(15,23,42,.55);--glass2:rgba(15,23,42,.7);
+      --glass3:rgba(20,30,52,.6);--glass-card:rgba(15,23,42,.45);
+      --border:rgba(56,189,248,.1);--border-hover:rgba(56,189,248,.25);
+      --border-strong:rgba(56,189,248,.35);
+      --accent:#38bdf8;--accent-dim:#0ea5e9;
+      --accent-glow:rgba(56,189,248,.15);--accent-glow2:rgba(56,189,248,.08);
+      --text:#cbd5e1;--text-bright:#e2e8f0;--text-muted:#64748b;--white:#f1f5f9;
+      --critical:#ef4444;--high:#f97316;--medium:#eab308;--low:#22c55e;
+      --mono:'Fira Code',monospace;--sans:'Inter',sans-serif;
+      --radius:10px;--radius-sm:6px;--blur:blur(16px);--blur-sm:blur(12px);
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html{scroll-behavior:smooth}
+    body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:14px;line-height:1.6;min-height:100vh;overflow-x:hidden}
+
+    /* ── BG MESH ── */
+    body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+      background:radial-gradient(ellipse 80% 60% at 10% 20%,rgba(14,165,233,.07) 0%,transparent 60%),
+        radial-gradient(ellipse 60% 80% at 90% 80%,rgba(56,189,248,.05) 0%,transparent 50%),
+        radial-gradient(ellipse 50% 50% at 50% 50%,rgba(15,23,42,.3) 0%,transparent 100%);
+      animation:meshDrift 25s ease-in-out infinite alternate}
+    @keyframes meshDrift{0%{opacity:1;transform:scale(1) translate(0,0)}50%{opacity:.85;transform:scale(1.05) translate(-1%,2%)}100%{opacity:1;transform:scale(1) translate(1%,-1%)}}
+
+    /* ── SCROLLBAR ── */
+    ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}
+    ::-webkit-scrollbar-thumb{background:rgba(56,189,248,.2);border-radius:3px}
+    ::-webkit-scrollbar-thumb:hover{background:rgba(56,189,248,.35)}
+
+    /* ── TOP BAR ── */
+    .topbar{position:fixed;top:0;left:0;right:0;z-index:100;
+      background:var(--glass2);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+      border-bottom:1px solid var(--border);padding:0 32px;height:52px;
+      display:flex;align-items:center;justify-content:space-between}
+    .topbar-logo{display:flex;align-items:center;gap:10px}
+    .topbar-logo span:first-child{font-size:20px;color:var(--accent);filter:drop-shadow(0 0 8px rgba(56,189,248,.4))}
+    .topbar-logo span:nth-child(2){font-family:var(--sans);font-weight:800;font-size:14px;color:var(--accent);text-transform:uppercase;letter-spacing:.06em}
+    .topbar-logo span:nth-child(3){font-size:11px;color:var(--text-muted);margin-left:4px}
+    .topbar-right{display:flex;align-items:center;gap:14px}
+    .topbar-link{font-size:11px;color:var(--text-muted);text-decoration:none;border:1px solid var(--border);
+      padding:5px 12px;border-radius:var(--radius-sm);transition:all .2s ease}
+    .topbar-link:hover{color:var(--accent);border-color:var(--accent-dim)}
+
+    /* ── LAYOUT ── */
+    .layout{display:grid;grid-template-columns:230px 1fr;min-height:100vh;padding-top:52px;position:relative;z-index:1}
+
+    /* ── SIDEBAR ── */
+    .sidebar{background:var(--glass);backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);
+      border-right:1px solid var(--border);padding:24px 0;position:sticky;top:52px;height:calc(100vh - 52px);overflow-y:auto}
+    .sidebar-title{padding:0 20px 16px;font-family:var(--sans);font-size:10px;letter-spacing:.14em;
+      text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border);margin-bottom:12px}
+    .sidebar a{display:flex;align-items:center;justify-content:space-between;
+      padding:9px 20px;font-size:12px;color:var(--text-muted);text-decoration:none;
+      border-left:2px solid transparent;transition:all .2s ease}
+    .sidebar a:hover,.sidebar a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-glow2)}
+    .sidebar .cat-count{font-size:10px;background:var(--glass3);border:1px solid var(--border);
+      padding:1px 7px;border-radius:10px;color:var(--text-muted);min-width:22px;text-align:center}
+    .sidebar a.active .cat-count{color:var(--accent);border-color:rgba(56,189,248,.2)}
+
+    /* ── MAIN ── */
+    .main-content{padding:40px 48px;max-width:920px}
+
+    /* ── HERO ── */
+    .hero{margin-bottom:36px}
+    .hero-title{font-family:var(--sans);font-size:32px;font-weight:800;color:var(--white);letter-spacing:-.03em;margin-bottom:6px}
+    .hero-title span{color:var(--accent);filter:drop-shadow(0 0 8px rgba(56,189,248,.3))}
+    .hero-sub{font-size:13px;color:var(--text-muted);margin-bottom:24px;max-width:560px;line-height:1.7}
+
+    /* ── PROGRESS ── */
+    .progress-wrap{margin-bottom:28px}
+    .progress-info{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+    .progress-label{font-family:var(--sans);font-size:12px;color:var(--text-muted)}
+    .progress-pct{font-family:var(--sans);font-size:14px;font-weight:800;color:var(--accent)}
+    .progress-bar{height:6px;background:var(--glass3);border-radius:3px;overflow:hidden;border:1px solid var(--border)}
+    .progress-fill{height:100%;background:linear-gradient(90deg,var(--accent-dim),var(--accent));
+      border-radius:3px;transition:width .4s ease;box-shadow:0 0 12px rgba(56,189,248,.3)}
+
+    /* ── STATS ── */
+    .stats-row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:32px}
+    .stat-card{background:var(--glass);backdrop-filter:var(--blur-sm);border:1px solid var(--border);
+      border-radius:var(--radius);padding:16px;text-align:center;transition:border-color .2s}
+    .stat-card:hover{border-color:var(--border-hover)}
+    .stat-num{font-family:var(--sans);font-size:28px;font-weight:800;color:var(--accent);text-shadow:0 0 16px rgba(56,189,248,.2)}
+    .stat-label{font-family:var(--sans);font-size:11px;color:var(--text-muted);margin-top:2px}
+
+    /* ── FILTER BAR ── */
+    .filter-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:32px}
+    .search-input{flex:1;min-width:200px;background:var(--glass2);backdrop-filter:var(--blur-sm);
+      border:1px solid var(--border);color:var(--text-bright);font-family:var(--mono);font-size:13px;
+      padding:10px 14px;border-radius:var(--radius-sm);outline:none;transition:all .2s}
+    .search-input:focus{border-color:var(--accent-dim);box-shadow:0 0 0 3px rgba(56,189,248,.12)}
+    .search-input::placeholder{color:var(--text-muted)}
+    .sev-filters{display:flex;gap:4px}
+    .sev-btn{background:var(--glass);backdrop-filter:var(--blur-sm);border:1px solid var(--border);
+      color:var(--text-muted);font-family:var(--sans);font-size:11px;font-weight:600;
+      padding:7px 14px;border-radius:var(--radius-sm);cursor:pointer;transition:all .2s;text-transform:uppercase}
+    .sev-btn:hover{border-color:var(--border-hover);color:var(--text)}
+    .sev-btn.active{color:var(--accent);border-color:var(--accent);background:var(--accent-glow2);
+      box-shadow:0 0 12px rgba(56,189,248,.1)}
+    .sev-btn[data-sev="critical"].active{color:var(--critical);border-color:var(--critical);
+      background:rgba(239,68,68,.08);box-shadow:0 0 12px rgba(239,68,68,.1)}
+    .sev-btn[data-sev="high"].active{color:var(--high);border-color:var(--high);
+      background:rgba(249,115,22,.08);box-shadow:0 0 12px rgba(249,115,22,.1)}
+    .sev-btn[data-sev="medium"].active{color:var(--medium);border-color:var(--medium);
+      background:rgba(234,179,8,.08);box-shadow:0 0 12px rgba(234,179,8,.1)}
+    .sev-btn[data-sev="low"].active{color:var(--low);border-color:var(--low);
+      background:rgba(34,197,94,.08);box-shadow:0 0 12px rgba(34,197,94,.1)}
+
+    /* ── CATEGORY SECTIONS ── */
+    .cat-section{margin-bottom:40px}
+    .cat-heading{display:flex;align-items:center;gap:12px;margin-bottom:18px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+    .cat-name{font-family:var(--sans);font-size:18px;font-weight:800;color:var(--white);letter-spacing:-.01em}
+    .cat-badge{font-size:10px;background:var(--glass3);border:1px solid var(--border);
+      color:var(--text-muted);padding:2px 8px;border-radius:10px}
+
+    /* ── ITEM CARDS ── */
+    .item-card{background:var(--glass-card);backdrop-filter:var(--blur-sm);-webkit-backdrop-filter:var(--blur-sm);
+      border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;
+      transition:all .2s ease;overflow:hidden}
+    .item-card:hover{border-color:var(--border-hover);transform:translateY(-1px);
+      box-shadow:0 4px 20px rgba(0,0,0,.2)}
+    .item-card.checked{opacity:.55}
+    .item-card.checked .item-title{text-decoration:line-through;color:var(--text-muted)}
+    .item-header{display:flex;align-items:flex-start;gap:12px;padding:16px 18px;cursor:pointer;user-select:none}
+    .item-check{flex-shrink:0;width:18px;height:18px;border:1px solid var(--border);border-radius:4px;
+      background:var(--glass3);cursor:pointer;display:flex;align-items:center;justify-content:center;
+      transition:all .2s;margin-top:2px;position:relative}
+    .item-check:hover{border-color:var(--accent-dim)}
+    .item-check.done{background:var(--accent);border-color:var(--accent)}
+    .item-check.done::after{content:'✓';font-size:12px;color:#0a0e1a;font-weight:700}
+    .item-body{flex:1;min-width:0}
+    .item-title-row{display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap}
+    .item-title{font-family:var(--sans);font-size:13px;font-weight:700;color:var(--text-bright);transition:color .2s}
+    .badge{font-family:var(--sans);font-size:9px;font-weight:700;padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.06em;flex-shrink:0}
+    .badge-critical{background:rgba(239,68,68,.12);color:var(--critical)}
+    .badge-high{background:rgba(249,115,22,.12);color:var(--high)}
+    .badge-medium{background:rgba(234,179,8,.12);color:var(--medium)}
+    .badge-low{background:rgba(34,197,94,.12);color:var(--low)}
+    .item-desc{font-size:12px;color:var(--text-muted);line-height:1.6;margin-bottom:6px}
+    .item-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+    .item-ref{font-size:10px;color:var(--text-muted);font-style:italic}
+    .tag{font-size:9px;background:var(--glass3);border:1px solid var(--border);
+      color:var(--text-muted);padding:2px 6px;border-radius:3px}
+    .item-expand{font-size:16px;color:var(--text-muted);flex-shrink:0;transition:transform .2s;margin-top:2px}
+    .item-card.open .item-expand{transform:rotate(180deg);color:var(--accent)}
+
+    /* ── DETAIL PANEL ── */
+    .item-detail{max-height:0;overflow:hidden;transition:max-height .35s ease}
+    .item-card.open .item-detail{max-height:2000px}
+    .detail-inner{padding:0 18px 18px;border-top:1px solid var(--border);margin-top:0;padding-top:16px}
+    .detail-section{margin-bottom:16px}
+    .detail-section:last-child{margin-bottom:0}
+    .detail-label{font-family:var(--sans);font-size:10px;font-weight:700;letter-spacing:.12em;
+      text-transform:uppercase;color:var(--accent-dim);margin-bottom:8px}
+    .code-block{position:relative;background:rgba(10,14,26,.6);border:1px solid var(--border);
+      border-radius:var(--radius-sm);padding:14px 16px;margin-top:4px}
+    .code-block pre{font-family:var(--mono);font-size:12px;line-height:1.7;color:var(--accent);
+      white-space:pre-wrap;word-break:break-all}
+    .code-copy{position:absolute;top:8px;right:8px;background:var(--glass3);border:1px solid var(--border);
+      color:var(--text-muted);font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:4px;
+      cursor:pointer;transition:all .2s}
+    .code-copy:hover{color:var(--accent);border-color:var(--accent-dim)}
+    .code-copy.copied{color:var(--accent);border-color:var(--accent)}
+    .guid-text{font-size:12px;color:var(--text-muted);line-height:1.7}
+    .guid-steps{list-style:none;display:flex;flex-direction:column;gap:4px}
+    .guid-steps li{font-size:12px;color:var(--text-muted)}
+    .related-tags{display:flex;flex-wrap:wrap;gap:6px}
+    .related-tag{font-size:10px;color:var(--accent-dim);border:1px solid rgba(56,189,248,.15);
+      padding:2px 8px;border-radius:4px;cursor:pointer;transition:all .2s}
+    .related-tag:hover{border-color:var(--accent);color:var(--accent)}
+
+    /* ── NO RESULTS ── */
+    .no-results{text-align:center;padding:60px 20px;color:var(--text-muted);font-size:14px;display:none}
+    .no-results span{font-size:32px;display:block;margin-bottom:12px}
+
+    /* ── FOOTER ── */
+    .footer{text-align:center;padding:32px 20px;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border)}
+    .footer a{color:var(--accent-dim);text-decoration:none;transition:color .2s}
+    .footer a:hover{color:var(--accent)}
+
+    /* ── RESPONSIVE ── */
+    @media(max-width:768px){
+      .layout{grid-template-columns:1fr}
+      .sidebar{display:none}
+      .main-content{padding:24px 16px}
+      .stats-row{grid-template-columns:1fr 1fr}
+      .topbar{padding:0 16px}
+      .filter-bar{flex-direction:column}
+      .sev-filters{flex-wrap:wrap}
+    }
+  </style>
 </head>
 <body>
 
-  <!-- ── scan-line overlay ── -->
-  <div class="scanlines"></div>
-
-  <!-- ══════════════════════════════════════════════════════ HEADER -->
-  <header class="topbar">
-    <div class="topbar__brand">
-      <span class="topbar__logo">&lt;/&gt;</span>
-      <h1 class="topbar__title">AD Hardening <span class="topbar__sep">—</span> TheUnchecked</h1>
-    </div>
-    <div class="topbar__actions">
-      <button id="btn-menu" class="topbar__menu-btn" aria-label="Menu">&#9776;</button>
-    </div>
-  </header>
-
-  <!-- ══════════════════════════════════════════════════════ LAYOUT -->
-  <div class="layout">
-
-    <!-- ── sidebar ── -->
-    <aside id="sidebar" class="sidebar">
-      <nav class="sidebar__nav" id="sidebar-nav"></nav>
-    </aside>
-
-    <!-- ── main ── -->
-    <main class="main">
-
-      <!-- filters -->
-      <section class="filters">
-        <div class="filters__pills" id="severity-pills">
-          <button class="pill pill--critical active" data-severity="critical">Critico</button>
-          <button class="pill pill--high active"     data-severity="high">Alto</button>
-          <button class="pill pill--medium active"   data-severity="medium">Medio</button>
-          <button class="pill pill--low active"      data-severity="low">Basso</button>
-        </div>
-        <div class="filters__search">
-          <svg class="filters__search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input type="text" id="search-input" class="filters__input" placeholder="Cerca..." />
-        </div>
-      </section>
-
-      <!-- checklist container -->
-      <div id="checklist" class="checklist"></div>
-
-    </main>
+<!-- TOP BAR -->
+<header class="topbar">
+  <div class="topbar-logo">
+    <span>⬡</span>
+    <span>AD Hardening</span>
+    <span>by TheUnchecked</span>
   </div>
+  <div class="topbar-right">
+    <a href="admin.html" class="topbar-link">⚙ Admin</a>
+  </div>
+</header>
 
-  <!-- ══════════════════════════════════════════════════════ FOOTER -->
-  <footer class="footer">
-    <span>&copy; 2026 TheUnchecked — AD Hardening Checklist</span>
-  </footer>
+<div class="layout">
 
-  <script src="assets/js/app.js"></script>
+  <!-- SIDEBAR -->
+  <nav class="sidebar" id="sidebar">
+    <div class="sidebar-title">Categorie</div>
+    <div id="sidebar-links"></div>
+  </nav>
+
+  <!-- MAIN -->
+  <div class="main-content">
+
+    <!-- HERO -->
+    <div class="hero">
+      <h1 class="hero-title">AD Hardening <span>Checklist</span></h1>
+      <p class="hero-sub">Controlli di sicurezza per Active Directory — verifica, applica, proteggi.</p>
+    </div>
+
+    <!-- PROGRESS -->
+    <div class="progress-wrap">
+      <div class="progress-info">
+        <span class="progress-label">Progresso globale</span>
+        <span class="progress-pct" id="progress-pct">0%</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+    </div>
+
+    <!-- STATS -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-num" id="stat-total">0</div>
+        <div class="stat-label">Controlli totali</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="stat-critical">0</div>
+        <div class="stat-label">Critici</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="stat-cats">0</div>
+        <div class="stat-label">Categorie</div>
+      </div>
+    </div>
+
+    <!-- FILTER BAR -->
+    <div class="filter-bar">
+      <input type="text" class="search-input" id="search-input" placeholder="Cerca per titolo, descrizione, tag…" />
+      <div class="sev-filters">
+        <button class="sev-btn active" data-sev="all">Tutti</button>
+        <button class="sev-btn" data-sev="critical">Critico</button>
+        <button class="sev-btn" data-sev="high">Alto</button>
+        <button class="sev-btn" data-sev="medium">Medio</button>
+        <button class="sev-btn" data-sev="low">Basso</button>
+      </div>
+    </div>
+
+    <!-- CHECKLIST CONTAINER -->
+    <div id="checklist"></div>
+
+    <!-- NO RESULTS -->
+    <div class="no-results" id="no-results">
+      <span>🔍</span>
+      Nessun controllo trovato con i filtri attuali.
+    </div>
+
+    <!-- FOOTER -->
+    <div class="footer">
+      Built by <a href="https://github.com/TheUnchecked" target="_blank">TheUnchecked</a> · <a href="https://github.com/TheUnchecked/ad-hardening" target="_blank">GitHub</a>
+    </div>
+
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════
+   AD HARDENING — FROST OPS JS
+══════════════════════════════════════════ */
+
+let DATA = null;
+let currentSev = 'all';
+let currentSearch = '';
+
+/* ── LOAD JSON ── */
+fetch('data/checklist.json')
+  .then(r => r.json())
+  .then(data => { DATA = data; init(); })
+  .catch(err => {
+    document.getElementById('checklist').innerHTML =
+      '<div class="no-results" style="display:block"><span>⚠</span>Errore nel caricamento di checklist.json<br><small>' + err.message + '</small></div>';
+  });
+
+function escHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function init() {
+  renderSidebar();
+  renderChecklist();
+  updateStats();
+  updateProgress();
+  setupFilters();
+  setupScrollSpy();
+}
+
+/* ── SIDEBAR ── */
+function renderSidebar() {
+  const el = document.getElementById('sidebar-links');
+  el.innerHTML = DATA.categories.map(cat =>
+    `<a href="#cat-${cat.id}" data-cat="${cat.id}">
+      <span>${cat.name}</span>
+      <span class="cat-count">${cat.items.length}</span>
+    </a>`
+  ).join('');
+  el.querySelectorAll('a').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const target = document.getElementById('cat-' + a.dataset.cat);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+}
+
+/* ── RENDER CHECKLIST ── */
+function renderChecklist() {
+  const container = document.getElementById('checklist');
+  container.innerHTML = '';
+
+  let visibleTotal = 0;
+
+  DATA.categories.forEach(cat => {
+    const filtered = cat.items.filter(item => {
+      const matchSev = currentSev === 'all' || item.severity === currentSev;
+      if (!matchSev) return false;
+      if (!currentSearch) return true;
+      const q = currentSearch.toLowerCase();
+      const haystack = [item.title, item.description, item.ref, ...(item.tags||[])].join(' ').toLowerCase();
+      return haystack.includes(q);
+    });
+
+    if (filtered.length === 0) return;
+    visibleTotal += filtered.length;
+
+    const section = document.createElement('div');
+    section.className = 'cat-section';
+    section.id = 'cat-' + cat.id;
+
+    section.innerHTML = `
+      <div class="cat-heading">
+        <span class="cat-name">${escHtml(cat.name)}</span>
+        <span class="cat-badge">${filtered.length} controlli</span>
+      </div>
+    `;
+
+    filtered.forEach(item => {
+      const isChecked = localStorage.getItem('adh-checked-' + item.id) === '1';
+      const card = document.createElement('div');
+      card.className = 'item-card' + (isChecked ? ' checked' : '');
+      card.dataset.id = item.id;
+
+      const tags = (item.tags||[]).map(t => `<span class="tag">${escHtml(t)}</span>`).join('');
+      const ref = item.ref ? `<span class="item-ref">${escHtml(item.ref)}</span>` : '';
+
+      let detailHtml = '';
+
+      /* Command quick */
+      if (item.command_quick) {
+        detailHtml += `
+          <div class="detail-section">
+            <div class="detail-label">⚡ Comando rapido</div>
+            <div class="code-block">
+              <button class="code-copy" onclick="copyCode(this)">Copia</button>
+              <pre>${escHtml(item.command_quick)}</pre>
+            </div>
+          </div>`;
+      }
+
+      /* Command full */
+      if (item.command_full) {
+        detailHtml += `
+          <div class="detail-section">
+            <div class="detail-label">📋 Comando completo</div>
+            <div class="code-block">
+              <button class="code-copy" onclick="copyCode(this)">Copia</button>
+              <pre>${escHtml(item.command_full)}</pre>
+            </div>
+          </div>`;
+      }
+
+      /* Guidance */
+      if (item.guidance) {
+        const g = item.guidance;
+        if (g.exposure) {
+          detailHtml += `<div class="detail-section"><div class="detail-label">☠ Real-World Exposure</div><p class="guid-text">${escHtml(g.exposure)}</p></div>`;
+        }
+        if (g.execution && g.execution.length) {
+          detailHtml += `<div class="detail-section"><div class="detail-label">⚙ Practical Execution</div><ul class="guid-steps">${g.execution.map((s,i)=>`<li>${i+1}. ${escHtml(s)}</li>`).join('')}</ul></div>`;
+        }
+        if (g.verification) {
+          detailHtml += `<div class="detail-section"><div class="detail-label">✔ Verification</div><div class="code-block"><button class="code-copy" onclick="copyCode(this)">Copia</button><pre>${escHtml(g.verification)}</pre></div></div>`;
+        }
+        if (g.considerations) {
+          detailHtml += `<div class="detail-section"><div class="detail-label">⚠ Considerations</div><p class="guid-text">${escHtml(g.considerations)}</p></div>`;
+        }
+        if (g.signals) {
+          detailHtml += `<div class="detail-section"><div class="detail-label">◎ Operational Signals</div><div class="code-block"><button class="code-copy" onclick="copyCode(this)">Copia</button><pre>${escHtml(g.signals)}</pre></div></div>`;
+        }
+        if (g.related && g.related.length) {
+          detailHtml += `<div class="detail-section"><div class="detail-label">⇢ Related Items</div><div class="related-tags">${g.related.map(r=>`<span class="related-tag" onclick="jumpToItem('${r}')">${r}</span>`).join('')}</div></div>`;
+        }
+      }
+
+      card.innerHTML = `
+        <div class="item-header">
+          <div class="item-check ${isChecked?'done':''}" onclick="toggleCheck(event,'${item.id}')"></div>
+          <div class="item-body" onclick="toggleCard(this.closest('.item-card'))">
+            <div class="item-title-row">
+              <span class="item-title">${escHtml(item.title)}</span>
+              <span class="badge badge-${item.severity}">${({critical:'Critico',high:'Alto',medium:'Medio',low:'Basso'})[item.severity]||item.severity}</span>
+            </div>
+            <div class="item-desc">${escHtml(item.description)}</div>
+            <div class="item-meta">${ref}${tags}</div>
+          </div>
+          <div class="item-expand" onclick="toggleCard(this.closest('.item-card'))">▾</div>
+        </div>
+        ${detailHtml ? `<div class="item-detail"><div class="detail-inner">${detailHtml}</div></div>` : ''}
+      `;
+
+      section.appendChild(card);
+    });
+
+    container.appendChild(section);
+  });
+
+  document.getElementById('no-results').style.display = visibleTotal === 0 ? 'block' : 'none';
+}
+
+/* ── TOGGLE CARD ── */
+function toggleCard(card) {
+  card.classList.toggle('open');
+}
+
+/* ── TOGGLE CHECK ── */
+function toggleCheck(e, id) {
+  e.stopPropagation();
+  const card = e.target.closest('.item-card');
+  const check = card.querySelector('.item-check');
+  const done = !check.classList.contains('done');
+  check.classList.toggle('done', done);
+  card.classList.toggle('checked', done);
+  localStorage.setItem('adh-checked-' + id, done ? '1' : '0');
+  updateProgress();
+}
+
+/* ── COPY CODE ── */
+function copyCode(btn) {
+  const pre = btn.parentElement.querySelector('pre');
+  navigator.clipboard.writeText(pre.textContent).then(() => {
+    btn.textContent = '✓'; btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copia'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+/* ── JUMP TO ITEM ── */
+function jumpToItem(id) {
+  const card = document.querySelector(`.item-card[data-id="${id}"]`);
+  if (card) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.style.borderColor = 'var(--accent)';
+    setTimeout(() => card.style.borderColor = '', 1500);
+  }
+}
+
+/* ── STATS ── */
+function updateStats() {
+  let total = 0, crit = 0;
+  DATA.categories.forEach(c => {
+    c.items.forEach(i => { total++; if (i.severity === 'critical') crit++; });
+  });
+  document.getElementById('stat-total').textContent = total;
+  document.getElementById('stat-critical').textContent = crit;
+  document.getElementById('stat-cats').textContent = DATA.categories.length;
+}
+
+/* ── PROGRESS ── */
+function updateProgress() {
+  let total = 0, checked = 0;
+  DATA.categories.forEach(c => c.items.forEach(i => {
+    total++;
+    if (localStorage.getItem('adh-checked-' + i.id) === '1') checked++;
+  }));
+  const pct = total ? Math.round((checked / total) * 100) : 0;
+  document.getElementById('progress-pct').textContent = pct + '%';
+  document.getElementById('progress-fill').style.width = pct + '%';
+}
+
+/* ── FILTERS ── */
+function setupFilters() {
+  /* severity buttons */
+  document.querySelectorAll('.sev-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.sev-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentSev = btn.dataset.sev;
+      renderChecklist();
+    });
+  });
+
+  /* search */
+  let debounce;
+  document.getElementById('search-input').addEventListener('input', e => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      currentSearch = e.target.value.trim();
+      renderChecklist();
+    }, 300);
+  });
+}
+
+/* ── SCROLL SPY ── */
+function setupScrollSpy() {
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const id = entry.target.id.replace('cat-', '');
+        document.querySelectorAll('#sidebar-links a').forEach(a => {
+          a.classList.toggle('active', a.dataset.cat === id);
+        });
+      }
+    });
+  }, { rootMargin: '-80px 0px -60% 0px', threshold: 0 });
+
+  setTimeout(() => {
+    document.querySelectorAll('.cat-section').forEach(s => observer.observe(s));
+  }, 100);
+}
+</script>
 </body>
 </html>
