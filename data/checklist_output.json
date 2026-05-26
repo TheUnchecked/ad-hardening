@@ -1,0 +1,67 @@
+{
+  "categories": [
+    {
+      "id": "identity-access",
+      "name": "Identity & Access",
+      "items": [
+        {
+          "id": "ia-001",
+          "title": "Disabilitare l'account Guest",
+          "description": "L'account Guest consente accesso anonimo al dominio. Deve essere disabilitato su tutti i DC e le workstation.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 1.2",
+          "tags": [
+            "active-directory",
+            "account-management"
+          ],
+          "command_quick": "# Disabilita account Guest\nDisable-ADAccount -Identity 'Guest'",
+          "command_full": "# Verifica stato attuale\nGet-ADUser -Identity 'Guest' -Properties Enabled | Select Name, Enabled\n\n# Disabilita su tutti i DC\nGet-ADDomainController -Filter * | ForEach-Object {\n    Disable-ADAccount -Identity 'Guest' -Server $_.Name\n    Write-Host \"Guest disabilitato su $($_.Name)\"\n}\n\n# Conferma via GPO\n# Computer Config > Windows Settings > Security Settings\n# > Local Policies > Security Options\n# 'Accounts: Guest account status' → Disabled",
+          "guidance": {
+            "exposure": "L'account Guest permette accesso senza autenticazione a risorse condivise e può essere sfruttato per la ricognizione interna della rete. In ambienti con SMB o share di rete, un Guest attivo può essere usato per enumerare utenti e risorse senza lasciare tracce significative nei log.",
+            "execution": [
+              "Verificare lo stato dell'account Guest su tutti i DC con Get-ADUser\nDisabilitare l'account tramite PowerShell o GPO\nApplicare la GPO 'Accounts: Guest account status = Disabled' a livello di dominio\nVerificare che nessuna applicazione legacy dipenda dall'account Guest"
+            ],
+            "verification": "# Verifica stato Guest su tutto il dominio\nGet-ADDomainController -Filter * | ForEach-Object {\n    $g = Get-ADUser -Identity 'Guest' -Server $_.Name -Properties Enabled\n    [PSCustomObject]@{ DC=$_.Name; Abilitato=$g.Enabled }\n}",
+            "considerations": "Alcuni ambienti con stampanti di rete o applicazioni legacy usano l'account Guest per accedere a share. Identificare questi casi prima di disabilitare e sostituire con account di servizio dedicati.",
+            "signals": "# Logon con account Guest (Event ID 4624)\nindex=windows EventCode=4624 TargetUserName='Guest'\n| table _time, ComputerName, IpAddress, LogonType\n| sort -_time"
+          }
+        }
+      ]
+    },
+    {
+      "id": "services-config",
+      "name": "Servizi & configurazione",
+      "items": [
+        {
+          "id": "sc-001",
+          "title": "Disabilitare SMBv1 su tutti i sistemi",
+          "description": "SMBv1 espone i sistemi ad attacchi come WannaCry e EternalBlue. Deve essere disabilitato su tutti i server e client.",
+          "severity": "critical",
+          "ref": "CIS AD L1 – 3.1",
+          "tags": [
+            "smbv1",
+            "wannacry",
+            "lateral-movement"
+          ],
+          "command_quick": "Get-SmbServerConfiguration | Select EnableSMB1Protocol",
+          "command_full": "# Step 1: Verifica stato\nGet-SmbServerConfiguration | Select EnableSMB1Protocol\n# Step 2: Disabilita\nSet-SmbServerConfiguration -EnableSMB1Protocol $false -Force",
+          "guidance": {
+            "exposure": "WannaCry e EternalBlue hanno sfruttato SMBv1 per propagarsi su scala globale nel 2017.",
+            "execution": [
+              "Verifica stato SMBv1 su tutti i server",
+              "Disabilita via GPO o PowerShell",
+              "Monitora Event ID per connessioni SMBv1 residue"
+            ],
+            "verification": "Get-SmbServerConfiguration | Select EnableSMB1Protocol\n# Deve restituire False",
+            "considerations": "Alcuni sistemi legacy (stampanti, NAS vecchi) potrebbero richiedere SMBv1. Mappare le dipendenze prima della disabilitazione.",
+            "signals": "Event ID 551 (SMBv1 connection attempt)",
+            "related": [
+              "sc-002",
+              "sc-003"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
