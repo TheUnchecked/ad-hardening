@@ -147,21 +147,37 @@ function ConvertTo-LdapFilterValue {
 ################################################################################
 
 function Test-PrivilegedRights {
+    <#
+        Each candidate flag is tested independently against $Rights rather
+        than folded into one combined bitmask first: .NET's GenericAll is
+        itself already a union of nearly every other bit (0xF01FF), so
+        OR-ing it into a shared mask would make ANY right - including
+        harmless ones like ReadProperty - match. Testing "all bits of this
+        one flag are present" per candidate avoids that false-positive.
+    #>
     param(
         [Parameter(Mandatory = $true)]
         [System.DirectoryServices.ActiveDirectoryRights]$Rights
     )
 
-    $mask = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll `
-        -bor [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite `
-        -bor [System.DirectoryServices.ActiveDirectoryRights]::WriteDacl `
-        -bor [System.DirectoryServices.ActiveDirectoryRights]::WriteOwner `
-        -bor [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty `
-        -bor [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight `
-        -bor [System.DirectoryServices.ActiveDirectoryRights]::CreateChild `
-        -bor [System.DirectoryServices.ActiveDirectoryRights]::DeleteChild
+    $privilegedFlags = @(
+        [System.DirectoryServices.ActiveDirectoryRights]::GenericAll,
+        [System.DirectoryServices.ActiveDirectoryRights]::GenericWrite,
+        [System.DirectoryServices.ActiveDirectoryRights]::WriteDacl,
+        [System.DirectoryServices.ActiveDirectoryRights]::WriteOwner,
+        [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty,
+        [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
+        [System.DirectoryServices.ActiveDirectoryRights]::CreateChild,
+        [System.DirectoryServices.ActiveDirectoryRights]::DeleteChild
+    )
 
-    return (([Int32]$Rights -band [Int32]$mask) -ne 0)
+    $rightsValue = [Int32]$Rights
+    foreach ($flag in $privilegedFlags) {
+        $flagValue = [Int32]$flag
+        if (($rightsValue -band $flagValue) -eq $flagValue) { return $true }
+    }
+
+    return $false
 }
 
 function Get-PrivilegedAces {
