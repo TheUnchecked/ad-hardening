@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Aegis Collection - read-only, agentless Active Directory data collector for
+    ADCollector - read-only, agentless Active Directory data collector for
     security assessments and incident response.
 
 .DESCRIPTION
-    Aegis is a pure collector: it queries Active Directory over LDAP/ADSI and,
+    ADCollector is a pure collector: it queries Active Directory over LDAP/ADSI and,
     for sections 16-19, the domain's member servers directly via WMI/CIM, and
     reports the raw facts it finds as absolute values (raw attribute values and
     ISO-8601 timestamps). It performs NO write operations against Active
@@ -23,9 +23,9 @@
     WMI/CIM operations use the identity of the account that runs the script.
     It takes no parameters: running it is the entire interface.
 
-    Output: a self-contained aegis_collection.json and a single-file, offline
-    aegis_report.html, both written into a timestamped run folder that is then
-    compressed to a .zip archive.
+    Output: a self-contained adcollector_collection.json and a single-file,
+    offline adcollector_report.html, both written into a timestamped run
+    folder that is then compressed to a .zip archive.
 
 .LEGAL
     THIS SCRIPT IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
@@ -75,7 +75,7 @@ function Show-StepProgress {
         [Parameter(Mandatory = $true)]
         [string]$Status,
 
-        [string]$Activity = "Aegis Collection"
+        [string]$Activity = "ADCollector Collection"
     )
 
     $script:currentStep++
@@ -364,12 +364,12 @@ if ($PSScriptRoot) {
     $scriptRoot = (Get-Location).Path
 }
 
-$script:RunFolderName = "aegis_{0}" -f (Get-Date -Format "dd_MM_yyyy_HHmmss")
+$script:RunFolderName = "adcollector_{0}" -f (Get-Date -Format "dd_MM_yyyy_HHmmss")
 $script:RunFolderPath = Join-Path -Path $scriptRoot -ChildPath $script:RunFolderName
 
 New-Item -Path $script:RunFolderPath -ItemType Directory -Force | Out-Null
 
-$script:LogFilePath = Join-Path -Path $script:RunFolderPath -ChildPath "aegis_run.log"
+$script:LogFilePath = Join-Path -Path $script:RunFolderPath -ChildPath "adcollector_run.log"
 
 # Fingerprint the collector itself for chain-of-custody purposes.
 $script:ScriptSelfPath = $null
@@ -388,7 +388,7 @@ if ($script:ScriptSelfPath -and (Test-Path -Path $script:ScriptSelfPath)) {
     }
 }
 
-Write-Log -Message "Aegis Collection starting. Output folder: $($script:RunFolderPath)" -Level INFO
+Write-Log -Message "ADCollector starting. Output folder: $($script:RunFolderPath)" -Level INFO
 Write-Log -Message "Collector script SHA-256: $($script:ScriptSha256)" -Level INFO
 if (-not [string]::IsNullOrEmpty($script:RsatWarning)) {
     Write-Log -Message $script:RsatWarning -Level WARN
