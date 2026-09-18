@@ -2151,3 +2151,384 @@ if (-not $script:RsatAvailable) {
         Write-Log -Message "Section 9 failed: $($_.Exception.Message)" -Level ERROR
     }
 }
+
+################################################################################
+#                    SECTION 10 - KRBTGT ACCOUNT PASSWORD AGE                #
+################################################################################
+
+Show-StepProgress -Status "Section 10: Reading krbtgt account password age"
+Write-Log -Message "Section 10: reading krbtgt pwdLastSet" -Level INFO
+
+$script:Krbtgt = [PSCustomObject]@{
+    Found             = $false
+    DistinguishedName = "N/A"
+    PwdLastSetDisplay = "N/A"
+    PwdLastSetIso     = ""
+}
+
+try {
+    $krbtgtSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+    $krbtgtSearcher = New-Object System.DirectoryServices.DirectorySearcher($krbtgtSearchRoot)
+    try {
+        $krbtgtSearcher.Filter = "(&(objectCategory=person)(objectClass=user)(samAccountName=krbtgt))"
+        [void]$krbtgtSearcher.PropertiesToLoad.AddRange(@("distinguishedname", "pwdlastset"))
+
+        $krbtgtFound = $krbtgtSearcher.FindOne()
+        if ($krbtgtFound) {
+            $pwdInfo = Get-AdDate -Entry $krbtgtFound.Properties -Name "pwdlastset" -FileTime
+            $script:Krbtgt.Found             = $true
+            $script:Krbtgt.DistinguishedName = Get-AdProp -Entry $krbtgtFound.Properties -Name "distinguishedname" -Default "N/A"
+            $script:Krbtgt.PwdLastSetDisplay = $pwdInfo.Display
+            $script:Krbtgt.PwdLastSetIso     = $pwdInfo.Iso
+        }
+    } finally {
+        $krbtgtSearcher.Dispose()
+    }
+
+    Write-Log -Message "Section 10: krbtgt pwdLastSet = $($script:Krbtgt.PwdLastSetDisplay)" -Level OK
+} catch {
+    Write-Log -Message "Section 10 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                     SECTION 11 - KERBEROASTABLE ACCOUNTS                   #
+################################################################################
+
+Show-StepProgress -Status "Section 11: Enumerating kerberoastable accounts"
+Write-Log -Message "Section 11: enumerating accounts with an SPN that are not disabled" -Level INFO
+
+$script:Kerberoastable                = New-Object System.Collections.ArrayList
+$script:KerberoastableDnSet           = New-Object 'System.Collections.Generic.HashSet[string]'
+$script:KerberoastablePrivilegedCount = 0
+
+try {
+    $kerbSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+    $kerbSearcher = New-Object System.DirectoryServices.DirectorySearcher($kerbSearchRoot)
+    try {
+        # LDAP_MATCHING_RULE_BIT_AND on userAccountControl, negated, excludes
+        # disabled accounts (bit 0x2) without needing a second query.
+        $kerbSearcher.Filter   = "(&(objectCategory=person)(objectClass=user)(servicePrincipalName=*)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+        $kerbSearcher.PageSize = 1000
+        [void]$kerbSearcher.PropertiesToLoad.AddRange(@(
+            "distinguishedname", "samaccountname", "serviceprincipalname",
+            "pwdlastset", "whencreated", "lastlogontimestamp", "useraccountcontrol",
+            "admincount", "accountexpires", "sidhistory", "msds-supportedencryptiontypes"
+        ))
+
+        $kerbResults = $kerbSearcher.FindAll()
+        try {
+            foreach ($kerbResult in $kerbResults) {
+                $props = $kerbResult.Properties
+
+                $dn = Get-AdProp -Entry $props -Name "distinguishedname" -Default "N/A"
+
+                $spns = @()
+                if ($props.Contains("serviceprincipalname")) {
+                    foreach ($spnValue in $props["serviceprincipalname"]) { $spns += [string]$spnValue }
+                }
+
+                $adminCountValue = 0
+                try {
+                    if ($props.Contains("admincount") -and $props["admincount"].Count -gt 0) {
+                        $adminCountValue = [Int32]$props["admincount"][0]
+                    }
+                } catch { $adminCountValue = 0 }
+                $isPrivileged = [bool]($adminCountValue -eq 1)
+
+                $pwdLastSetInfo = Get-AdDate -Entry $props -Name "pwdlastset" -FileTime
+                $lastLogonInfo  = Get-AdDate -Entry $props -Name "lastlogontimestamp" -FileTime
+
+                $base = [ordered]@{
+                    DistinguishedName         = $dn
+                    SamAccountName             = Get-AdProp -Entry $props -Name "samaccountname" -Default "N/A"
+                    ServicePrincipalNames      = $spns
+                    PwdLastSetDisplay          = $pwdLastSetInfo.Display
+                    PwdLastSetIso              = $pwdLastSetInfo.Iso
+                    LastLogonTimestampDisplay  = $lastLogonInfo.Display
+                    LastLogonTimestampIso      = $lastLogonInfo.Iso
+                    IsPrivileged               = $isPrivileged
+                    AdminCount                 = $adminCountValue
+                    SupportedEncryptionTypes   = Get-AdProp -Entry $props -Name "msds-supportedencryptiontypes" -Default "N/A"
+                }
+
+                $kerbObject = New-AccountObject -Base $base -Result $kerbResult
+                [void]$script:Kerberoastable.Add($kerbObject)
+
+                if ($dn -and $dn -ne "N/A") { [void]$script:KerberoastableDnSet.Add($dn.ToLowerInvariant()) }
+                if ($isPrivileged) { $script:KerberoastablePrivilegedCount++ }
+            }
+        } finally {
+            $kerbResults.Dispose()
+        }
+    } finally {
+        $kerbSearcher.Dispose()
+    }
+
+    Write-Log -Message "Section 11: $($script:Kerberoastable.Count) kerberoastable accounts found ($($script:KerberoastablePrivilegedCount) privileged)" -Level OK
+} catch {
+    Write-Log -Message "Section 11 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                    SECTION 12 - AS-REP ROASTABLE ACCOUNTS                  #
+################################################################################
+
+Show-StepProgress -Status "Section 12: Enumerating AS-REP roastable accounts"
+Write-Log -Message "Section 12: enumerating accounts with Kerberos pre-authentication disabled" -Level INFO
+
+$script:AsrepRoastable                = New-Object System.Collections.ArrayList
+$script:AsrepRoastablePrivilegedCount = 0
+
+try {
+    $asrepSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+    $asrepSearcher = New-Object System.DirectoryServices.DirectorySearcher($asrepSearchRoot)
+    try {
+        # 4194304 = 0x400000 = DONT_REQ_PREAUTH, again excluding disabled accounts.
+        $asrepSearcher.Filter   = "(&(objectCategory=person)(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+        $asrepSearcher.PageSize = 1000
+        [void]$asrepSearcher.PropertiesToLoad.AddRange(@(
+            "distinguishedname", "samaccountname", "pwdlastset", "whencreated",
+            "lastlogontimestamp", "useraccountcontrol", "admincount",
+            "accountexpires", "sidhistory"
+        ))
+
+        $asrepResults = $asrepSearcher.FindAll()
+        try {
+            foreach ($asrepResult in $asrepResults) {
+                $props = $asrepResult.Properties
+
+                $dn = Get-AdProp -Entry $props -Name "distinguishedname" -Default "N/A"
+
+                $adminCountValue = 0
+                try {
+                    if ($props.Contains("admincount") -and $props["admincount"].Count -gt 0) {
+                        $adminCountValue = [Int32]$props["admincount"][0]
+                    }
+                } catch { $adminCountValue = 0 }
+                $isPrivileged = [bool]($adminCountValue -eq 1)
+
+                $isAlsoKerberoastable = $false
+                if ($dn -and $dn -ne "N/A") {
+                    $isAlsoKerberoastable = $script:KerberoastableDnSet.Contains($dn.ToLowerInvariant())
+                }
+
+                $pwdLastSetInfo = Get-AdDate -Entry $props -Name "pwdlastset" -FileTime
+                $lastLogonInfo  = Get-AdDate -Entry $props -Name "lastlogontimestamp" -FileTime
+
+                $base = [ordered]@{
+                    DistinguishedName         = $dn
+                    SamAccountName             = Get-AdProp -Entry $props -Name "samaccountname" -Default "N/A"
+                    PwdLastSetDisplay          = $pwdLastSetInfo.Display
+                    PwdLastSetIso              = $pwdLastSetInfo.Iso
+                    LastLogonTimestampDisplay  = $lastLogonInfo.Display
+                    LastLogonTimestampIso      = $lastLogonInfo.Iso
+                    IsPrivileged               = $isPrivileged
+                    AdminCount                 = $adminCountValue
+                    IsAlsoKerberoastable       = $isAlsoKerberoastable
+                }
+
+                $asrepObject = New-AccountObject -Base $base -Result $asrepResult
+                [void]$script:AsrepRoastable.Add($asrepObject)
+
+                if ($isPrivileged) { $script:AsrepRoastablePrivilegedCount++ }
+            }
+        } finally {
+            $asrepResults.Dispose()
+        }
+    } finally {
+        $asrepSearcher.Dispose()
+    }
+
+    Write-Log -Message "Section 12: $($script:AsrepRoastable.Count) AS-REP roastable accounts found ($($script:AsrepRoastablePrivilegedCount) privileged)" -Level OK
+} catch {
+    Write-Log -Message "Section 12 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                 SECTION 13 - BUILT-IN GUEST ACCOUNT (RID 501)              #
+################################################################################
+
+Show-StepProgress -Status "Section 13: Locating the built-in Guest account by RID"
+Write-Log -Message "Section 13: locating the built-in Guest account via RID 501 (stable even if renamed)" -Level INFO
+
+$script:GuestAccount = [PSCustomObject]@{
+    Found              = $false
+    Sid                = $null
+    SamAccountName     = "N/A"
+    IsRenamed          = $false
+    IsDisabled         = $false
+    WhenCreatedDisplay = "N/A"
+    WhenCreatedIso     = ""
+    PwdLastSetDisplay  = "N/A"
+    PwdLastSetIso      = ""
+    AdminCount         = 0
+    MemberOf           = @()
+}
+
+try {
+    if ($script:CurrentDomainSid) {
+        $guestSid = "$($script:CurrentDomainSid)-501"
+        $escapedGuestSid = ConvertTo-LdapFilterValue -Value $guestSid
+
+        $guestSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+        $guestSearcher = New-Object System.DirectoryServices.DirectorySearcher($guestSearchRoot)
+        try {
+            $guestSearcher.Filter = "(objectSid=$escapedGuestSid)"
+            [void]$guestSearcher.PropertiesToLoad.AddRange(@(
+                "samaccountname", "useraccountcontrol", "whencreated",
+                "pwdlastset", "admincount", "memberof"
+            ))
+
+            $guestFound = $guestSearcher.FindOne()
+            if ($guestFound) {
+                $props = $guestFound.Properties
+
+                $uac = 0
+                try {
+                    if ($props.Contains("useraccountcontrol") -and $props["useraccountcontrol"].Count -gt 0) {
+                        $uac = [Int64]$props["useraccountcontrol"][0]
+                    }
+                } catch { $uac = 0 }
+
+                $adminCountValue = 0
+                try {
+                    if ($props.Contains("admincount") -and $props["admincount"].Count -gt 0) {
+                        $adminCountValue = [Int32]$props["admincount"][0]
+                    }
+                } catch { $adminCountValue = 0 }
+
+                $memberOf = @()
+                if ($props.Contains("memberof")) {
+                    foreach ($m in $props["memberof"]) { $memberOf += [string]$m }
+                }
+
+                $samAccountName  = Get-AdProp -Entry $props -Name "samaccountname" -Default "N/A"
+                $whenCreatedInfo = Get-AdDate -Entry $props -Name "whencreated"
+                $pwdLastSetInfo  = Get-AdDate -Entry $props -Name "pwdlastset" -FileTime
+
+                $script:GuestAccount.Found              = $true
+                $script:GuestAccount.Sid                = $guestSid
+                $script:GuestAccount.SamAccountName     = $samAccountName
+                $script:GuestAccount.IsRenamed          = (-not $samAccountName.Equals("Guest", [StringComparison]::OrdinalIgnoreCase))
+                $script:GuestAccount.IsDisabled         = [bool]($uac -band 0x2)
+                $script:GuestAccount.WhenCreatedDisplay = $whenCreatedInfo.Display
+                $script:GuestAccount.WhenCreatedIso     = $whenCreatedInfo.Iso
+                $script:GuestAccount.PwdLastSetDisplay  = $pwdLastSetInfo.Display
+                $script:GuestAccount.PwdLastSetIso      = $pwdLastSetInfo.Iso
+                $script:GuestAccount.AdminCount         = $adminCountValue
+                $script:GuestAccount.MemberOf           = $memberOf
+            }
+        } finally {
+            $guestSearcher.Dispose()
+        }
+    }
+
+    Write-Log -Message "Section 13: Guest account found=$($script:GuestAccount.Found), renamed=$($script:GuestAccount.IsRenamed)" -Level OK
+} catch {
+    Write-Log -Message "Section 13 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#               SECTION 14 - MSOL_ AZURE AD CONNECT SERVICE ACCOUNTS         #
+################################################################################
+
+Show-StepProgress -Status "Section 14: Enumerating MSOL_ service accounts"
+Write-Log -Message "Section 14: enumerating accounts with samAccountName starting with MSOL_" -Level INFO
+
+$script:MsolAccounts = New-Object System.Collections.ArrayList
+
+try {
+    $msolSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+    $msolSearcher = New-Object System.DirectoryServices.DirectorySearcher($msolSearchRoot)
+    try {
+        $msolSearcher.Filter = "(&(objectCategory=person)(objectClass=user)(samAccountName=MSOL_*))"
+        [void]$msolSearcher.PropertiesToLoad.AddRange(@("samaccountname", "distinguishedname", "objectsid"))
+
+        $msolResults = $msolSearcher.FindAll()
+        try {
+            foreach ($msolResult in $msolResults) {
+                $props = $msolResult.Properties
+
+                $rawSid = $null
+                if ($props.Contains("objectsid") -and $props["objectsid"].Count -gt 0) {
+                    $rawSid = $props["objectsid"][0]
+                }
+
+                [void]$script:MsolAccounts.Add([PSCustomObject]@{
+                    SamAccountName    = Get-AdProp -Entry $props -Name "samaccountname" -Default "N/A"
+                    DistinguishedName = Get-AdProp -Entry $props -Name "distinguishedname" -Default "N/A"
+                    ObjectSid         = Convert-ObjectSidToString -RawSid $rawSid
+                })
+            }
+        } finally {
+            $msolResults.Dispose()
+        }
+    } finally {
+        $msolSearcher.Dispose()
+    }
+
+    Write-Log -Message "Section 14: $($script:MsolAccounts.Count) MSOL_ accounts found" -Level OK
+} catch {
+    Write-Log -Message "Section 14 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                        SECTION 15 - LAPS DEPLOYMENT STATE                  #
+################################################################################
+
+Show-StepProgress -Status "Section 15: Determining LAPS deployment state"
+Write-Log -Message "Section 15: checking schema for LAPS attributes and counting populated expirations" -Level INFO
+
+function Test-SchemaAttributePresent {
+    <#
+        Querying an attribute that does not exist in the schema is itself an
+        LDAP error, so schema presence has to be checked first and each LAPS
+        generation's computer count only queried for the versions actually
+        found.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LdapDisplayName
+    )
+    try {
+        $escapedName = ConvertTo-LdapFilterValue -Value $LdapDisplayName
+        $schemaSearchRoot = [ADSI]("LDAP://" + $script:SchemaNamingContext)
+        $schemaSearcher = New-Object System.DirectoryServices.DirectorySearcher($schemaSearchRoot)
+        try {
+            $schemaSearcher.Filter = "(&(objectClass=attributeSchema)(lDAPDisplayName=$escapedName))"
+            [void]$schemaSearcher.PropertiesToLoad.AddRange(@("ldapdisplayname"))
+            $found = $schemaSearcher.FindOne()
+            return [bool]$found
+        } finally {
+            $schemaSearcher.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+$script:Laps = [PSCustomObject]@{
+    LegacyPresentInSchema          = $false
+    LegacyExpiryPopulatedCount     = 0
+    ModernPasswordPresentInSchema  = $false
+    ModernEncryptedPresentInSchema = $false
+    ModernExpiryPopulatedCount     = 0
+}
+
+try {
+    $script:Laps.LegacyPresentInSchema          = Test-SchemaAttributePresent -LdapDisplayName "ms-Mcs-AdmPwd"
+    $script:Laps.ModernPasswordPresentInSchema  = Test-SchemaAttributePresent -LdapDisplayName "msLAPS-Password"
+    $script:Laps.ModernEncryptedPresentInSchema = Test-SchemaAttributePresent -LdapDisplayName "msLAPS-EncryptedPassword"
+
+    if ($script:Laps.LegacyPresentInSchema) {
+        $script:Laps.LegacyExpiryPopulatedCount = @($script:Computers | Where-Object { $_.LapsLegacyExpirationIso }).Count
+    }
+
+    if ($script:Laps.ModernPasswordPresentInSchema -or $script:Laps.ModernEncryptedPresentInSchema) {
+        $script:Laps.ModernExpiryPopulatedCount = @($script:Computers | Where-Object { $_.LapsWindowsExpirationIso }).Count
+    }
+
+    Write-Log -Message "Section 15: legacy LAPS in schema=$($script:Laps.LegacyPresentInSchema), Windows LAPS in schema=$($script:Laps.ModernPasswordPresentInSchema -or $script:Laps.ModernEncryptedPresentInSchema)" -Level OK
+} catch {
+    Write-Log -Message "Section 15 failed: $($_.Exception.Message)" -Level ERROR
+}
