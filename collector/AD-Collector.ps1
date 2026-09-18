@@ -733,12 +733,18 @@ try {
 Show-StepProgress -Status "Section 3: Resolving transitive privileged group membership"
 Write-Log -Message "Section 3: resolving transitive group membership for $($script:AllUsers.Count) users" -Level INFO
 
-# lowercased monitored-group DN -> ArrayList of privileged user objects.
-# This reverse index lets Sections 4/5/5b resolve ACL delegations that name a
-# group in O(1) instead of re-walking every user's membership again.
+# lowercased monitored-group DN -> ArrayList of privileged user objects
+# (monitored-groups-only view, used for the unified list in step 3).
 $script:PrivilegedUsersByGroup = @{}
+# lowercased ANY-group DN -> ArrayList of {User; Relationship}. Unlike the
+# index above this is not limited to the curated monitored-groups list: an
+# ACL delegation in Sections 4/5/5b can name any group in the domain (an
+# Exchange group, a custom IT-support group, ...), so the reverse index that
+# resolves "who is a member of this group" in O(1) has to cover every group
+# encountered in any user's closure, not just the privileged ones.
+$script:GroupMembersIndex = @{}
 # Shared across every user so a given group's memberOf is read from AD once.
-$script:GroupMemberOfCache     = @{}
+$script:GroupMemberOfCache = @{}
 
 try {
     foreach ($userObject in $script:AllUsers) {
@@ -751,10 +757,19 @@ try {
         $isPrivileged = $false
 
         foreach ($closureKey in $closure.Keys) {
+            $relationship = $closure[$closureKey].Relationship
+
+            if (-not $script:GroupMembersIndex.ContainsKey($closureKey)) {
+                $script:GroupMembersIndex[$closureKey] = New-Object System.Collections.ArrayList
+            }
+            [void]$script:GroupMembersIndex[$closureKey].Add([PSCustomObject]@{
+                User         = $userObject
+                Relationship = $relationship
+            })
+
             if (-not $script:MonitoredGroupsByDn.ContainsKey($closureKey)) { continue }
 
-            $groupCn      = $script:MonitoredGroupsByDn[$closureKey]
-            $relationship = $closure[$closureKey].Relationship
+            $groupCn = $script:MonitoredGroupsByDn[$closureKey]
             $membershipDetailParts.Add("$groupCn ($relationship)")
 
             $isPrivileged = $true
@@ -780,3 +795,470 @@ try {
 } catch {
     Write-Log -Message "Section 3 failed: $($_.Exception.Message)" -Level ERROR
 }
+
+################################################################################
+#              ACL DELEGATION HELPERS (SECTIONS 4, 5, 5b + UNIFIED LIST)     #
+################################################################################
+
+# Trustees whose ACEs are noise rather than a delegation: broad built-in
+# principals that legitimately hold privileged rights on many AD objects.
+$script:EveryoneLikeTrustees = @(
+    "Everyone", "Authenticated Users", "Users", "Domain Users",
+    "Domain Computers", "Pre-Windows 2000 Compatible Access",
+    "Guests", "Domain Guests"
+)
+
+# Dedicated searcher + cache for principal resolution, reused by every ACL
+# section so the same trustee is never looked up against AD twice.
+$script:PrincipalResolutionCache = @{}
+$script:PrincipalSearcherRoot    = [ADSI]("LDAP://" + $script:BaseDN)
+$script:PrincipalSearcher        = New-Object System.DirectoryServices.DirectorySearcher($script:PrincipalSearcherRoot)
+[void]$script:PrincipalSearcher.PropertiesToLoad.AddRange(@("samaccountname", "objectclass", "distinguishedname"))
+
+function Resolve-WellKnownPrincipal {
+    <#
+        SID translation is language- and role-dependent (some of these only
+        resolve to a name on a domain controller), so a trustee that AD
+        itself does not know about still needs to be classified as a known
+        Windows/NT built-in rather than falling through to Unknown.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Trustee
+    )
+
+    $knownAuthorities = @(
+        "NT AUTHORITY", "BUILTIN", "NT SERVICE", "NT VIRTUAL MACHINE",
+        "Font Driver Host", "APPLICATION PACKAGE AUTHORITY", "IIS APPPOOL",
+        "Window Manager", "CREATOR GROUP", "OWNER RIGHTS", "SELF"
+    )
+    $knownNames = @(
+        "Everyone", "CREATOR OWNER", "SERVICE", "DIALUP", "NETWORK", "PROXY",
+        "ANONYMOUS LOGON", "BATCH", "INTERACTIVE", "RESTRICTED",
+        "TERMINAL SERVER USER", "LOCAL", "CONSOLE LOGON"
+    )
+
+    $authority  = $null
+    $leaf       = $Trustee
+    $slashIndex = $Trustee.LastIndexOf("\")
+    if ($slashIndex -ge 0) {
+        $authority = $Trustee.Substring(0, $slashIndex)
+        $leaf      = $Trustee.Substring($slashIndex + 1)
+    }
+
+    $isKnownAuthority = $false
+    if ($authority) {
+        foreach ($candidate in $knownAuthorities) {
+            if ($authority.Equals($candidate, [StringComparison]::OrdinalIgnoreCase)) {
+                $isKnownAuthority = $true
+                break
+            }
+        }
+    }
+
+    $isKnownName = $false
+    foreach ($candidate in $knownNames) {
+        if ($leaf.Equals($candidate, [StringComparison]::OrdinalIgnoreCase)) {
+            $isKnownName = $true
+            break
+        }
+    }
+
+    if ($isKnownAuthority -or $isKnownName) {
+        return [PSCustomObject]@{ Trustee = $Trustee; Type = "WellKnown"; Name = $Trustee; Dn = $null }
+    }
+
+    # Orphaned SID: no domain object and no known Windows/NT built-in matched it.
+    return [PSCustomObject]@{ Trustee = $Trustee; Type = "Unknown"; Name = $Trustee; Dn = $null }
+}
+
+function Resolve-Principal {
+    <#
+        Classifies an ACE trustee as User, Group, WellKnown or Unknown.
+        Raw-SID trustees (.NET failed to translate them to a name) are looked
+        up by objectSid; named trustees by samAccountName/cn. This works off
+        a domain controller too, unlike NTAccount SID translation.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Trustee
+    )
+
+    if ($script:PrincipalResolutionCache.ContainsKey($Trustee)) {
+        return $script:PrincipalResolutionCache[$Trustee]
+    }
+
+    $result = [PSCustomObject]@{ Trustee = $Trustee; Type = "Unknown"; Name = $Trustee; Dn = $null }
+
+    try {
+        $isRawSid = $Trustee -match '^S-1-\d+(-\d+)+$'
+
+        if ($isRawSid) {
+            $escapedSid = ConvertTo-LdapFilterValue -Value $Trustee
+            $script:PrincipalSearcher.Filter = "(objectSid=$escapedSid)"
+        } else {
+            $leaf = $Trustee
+            $slashIndex = $Trustee.LastIndexOf("\")
+            if ($slashIndex -ge 0) { $leaf = $Trustee.Substring($slashIndex + 1) }
+            $escapedLeaf = ConvertTo-LdapFilterValue -Value $leaf
+            $script:PrincipalSearcher.Filter = "(|(samAccountName=$escapedLeaf)(cn=$escapedLeaf))"
+        }
+
+        $found = $script:PrincipalSearcher.FindOne()
+
+        if ($found) {
+            $objectClasses = @()
+            if ($found.Properties.Contains("objectclass")) {
+                foreach ($oc in $found.Properties["objectclass"]) { $objectClasses += [string]$oc }
+            }
+
+            if ($objectClasses -contains "group") {
+                $result.Type = "Group"
+            } elseif ($objectClasses -contains "user") {
+                # Computer accounts are schema subclasses of "user", so they
+                # are classified as User here too.
+                $result.Type = "User"
+            } else {
+                $result.Type = "Other"
+            }
+
+            $result.Name = Get-AdProp -Entry $found.Properties -Name "samaccountname" -Default $Trustee
+            $result.Dn   = Get-AdProp -Entry $found.Properties -Name "distinguishedname" -Default $null
+        } else {
+            $result = Resolve-WellKnownPrincipal -Trustee $Trustee
+        }
+    } catch {
+        $result = Resolve-WellKnownPrincipal -Trustee $Trustee
+    }
+
+    $script:PrincipalResolutionCache[$Trustee] = $result
+    return $result
+}
+
+function Add-DelegationUser {
+    <#
+        Accumulates a user's delegation provenance across ACEs/containers.
+        The stored object is a copy of the account record so the caller's own
+        AllUsers entry is never mutated by a delegation-map merge.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Hashtable]$Map,
+
+        [Parameter(Mandatory = $true)]
+        $UserInfo,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Source
+    )
+
+    $key = ([string]$UserInfo.DistinguishedName).ToLowerInvariant()
+
+    if ($Map.ContainsKey($key)) {
+        $existingSources = @()
+        if ($Map[$key].DelegationSource) { $existingSources = @($Map[$key].DelegationSource -split "; ") }
+        if ($existingSources -notcontains $Source) {
+            if ($Map[$key].DelegationSource) {
+                $Map[$key].DelegationSource = "$($Map[$key].DelegationSource); $Source"
+            } else {
+                $Map[$key].DelegationSource = $Source
+            }
+        }
+        return
+    }
+
+    # Field order mirrors New-AccountObject exactly (DelegationSource is
+    # simply appended), so a delegation-only record and a group-membership
+    # record share the same shape once merged into the unified list.
+    $clone = $UserInfo.PSObject.Copy()
+    Add-Member -InputObject $clone -MemberType NoteProperty -Name "DelegationSource" -Value $Source -Force
+    $Map[$key] = $clone
+}
+
+function Resolve-DelegationUsersMap {
+    <#
+        Turns a list of resolved ACE principals into a DN-keyed map of
+        delegated users. A User-type principal is a direct grant; a
+        Group-type principal is expanded through the group -> members
+        reverse index built in Section 3, labeling each member as a direct
+        or nested member of that specific group.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [PSCustomObject[]]$Principals,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Hashtable]$UserIndex,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Hashtable]$UserBySam,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Hashtable]$GroupToUsers,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DirectLabel,
+
+        [Parameter(Mandatory = $true)]
+        [string]$GroupPrefix
+    )
+
+    $map = @{}
+
+    foreach ($principal in $Principals) {
+        if ($principal.Type -eq "User") {
+            $userObj = $null
+            if ($principal.Dn -and $UserIndex.ContainsKey($principal.Dn.ToLowerInvariant())) {
+                $userObj = $UserIndex[$principal.Dn.ToLowerInvariant()]
+            } elseif ($UserBySam.ContainsKey($principal.Name.ToLowerInvariant())) {
+                $userObj = $UserBySam[$principal.Name.ToLowerInvariant()]
+            }
+            if ($userObj) {
+                Add-DelegationUser -Map $map -UserInfo $userObj -Source $DirectLabel
+            }
+        } elseif ($principal.Type -eq "Group" -and $principal.Dn) {
+            $groupKey = $principal.Dn.ToLowerInvariant()
+            if ($GroupToUsers.ContainsKey($groupKey)) {
+                foreach ($member in $GroupToUsers[$groupKey]) {
+                    $label = "$GroupPrefix - $($member.Relationship) member of $($principal.Name)"
+                    Add-DelegationUser -Map $map -UserInfo $member.User -Source $label
+                }
+            }
+        }
+    }
+
+    return $map
+}
+
+function Get-ContainerAclDelegation {
+    <#
+        Shared logic behind Sections 4, 5 and 5b: read an object's ACL,
+        keep only privileged ACEs, resolve each trustee and expand it into
+        the set of delegated users. A missing container (e.g. no Exchange
+        installed) degrades to an empty, non-fatal result.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $result = [PSCustomObject]@{
+        PrivilegedAces       = @()
+        DelegationPrincipals = @{}
+        Found                = $false
+    }
+
+    try {
+        if (-not [System.DirectoryServices.DirectoryEntry]::Exists("LDAP://$ContainerPath")) {
+            Write-Log -Message "$Label`: container not found ($ContainerPath), skipping." -Level WARN
+            return $result
+        }
+
+        $entry = [ADSI]("LDAP://" + $ContainerPath)
+        $acl   = $entry.psbase.ObjectSecurity
+
+        $result.PrivilegedAces = @(Get-PrivilegedAces -Acl $acl -ObjectDN $ContainerPath -EveryoneLike $script:EveryoneLikeTrustees)
+        $result.Found          = $true
+
+        $principals = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($ace in $result.PrivilegedAces) {
+            $principals.Add((Resolve-Principal -Trustee $ace.Trustee))
+        }
+
+        $result.DelegationPrincipals = Resolve-DelegationUsersMap `
+            -Principals $principals `
+            -UserIndex $script:UsersByDn `
+            -UserBySam $script:UsersBySam `
+            -GroupToUsers $script:GroupMembersIndex `
+            -DirectLabel "$Label (direct)" `
+            -GroupPrefix $Label
+    } catch {
+        Write-Log -Message "$Label failed: $($_.Exception.Message)" -Level WARN
+    }
+
+    return $result
+}
+
+################################################################################
+#                   SECTION 4 - DOMAIN ROOT ACL DELEGATIONS                  #
+################################################################################
+
+Show-StepProgress -Status "Section 4: Reading domain root ACL"
+Write-Log -Message "Section 4: reading ACL on the domain root object" -Level INFO
+
+$script:RootPrivilegedAces       = @()
+$script:RootDelegationPrincipals = @{}
+
+try {
+    $rootAclInfo = Get-ContainerAclDelegation -ContainerPath $script:BaseDN -Label "Domain root ACL"
+    $script:RootPrivilegedAces       = $rootAclInfo.PrivilegedAces
+    $script:RootDelegationPrincipals = $rootAclInfo.DelegationPrincipals
+
+    Write-Log -Message "Section 4: $($script:RootPrivilegedAces.Count) privileged ACEs, $($script:RootDelegationPrincipals.Count) users resolved via delegation" -Level OK
+} catch {
+    Write-Log -Message "Section 4 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#              SECTION 5 - DOMAIN CONTROLLERS OU ACL DELEGATIONS             #
+################################################################################
+
+Show-StepProgress -Status "Section 5: Reading Domain Controllers OU ACL"
+Write-Log -Message "Section 5: reading ACL on the Domain Controllers OU" -Level INFO
+
+$script:DcOuPrivilegedAces       = @()
+$script:DcOuDelegationPrincipals = @{}
+
+try {
+    $dcOuPath    = "OU=Domain Controllers," + $script:BaseDN
+    $dcOuAclInfo = Get-ContainerAclDelegation -ContainerPath $dcOuPath -Label "Domain Controllers OU ACL"
+    $script:DcOuPrivilegedAces       = $dcOuAclInfo.PrivilegedAces
+    $script:DcOuDelegationPrincipals = $dcOuAclInfo.DelegationPrincipals
+
+    Write-Log -Message "Section 5: $($script:DcOuPrivilegedAces.Count) privileged ACEs, $($script:DcOuDelegationPrincipals.Count) users resolved via delegation" -Level OK
+} catch {
+    Write-Log -Message "Section 5 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                 SECTION 5b - EXCHANGE CONTAINER ACL DELEGATIONS            #
+################################################################################
+
+Show-StepProgress -Status "Section 5b: Reading Exchange delegation container ACLs"
+Write-Log -Message "Section 5b: reading ACLs on Exchange delegation containers" -Level INFO
+
+$script:ExchangePrivilegedAces       = @()
+$script:ExchangeDelegationPrincipals = @{}
+
+try {
+    $exchangeContainers = @(
+        ("CN=Microsoft Exchange Security Groups," + $script:BaseDN),
+        ("CN=Microsoft Exchange System Objects," + $script:BaseDN)
+    )
+    if ($script:ConfigurationNamingContext) {
+        $exchangeContainers += ("CN=Microsoft Exchange,CN=Services," + $script:ConfigurationNamingContext)
+    }
+
+    $combinedAces      = New-Object 'System.Collections.Generic.List[object]'
+    $combinedDelegation = @{}
+
+    foreach ($containerPath in $exchangeContainers) {
+        $containerInfo = Get-ContainerAclDelegation -ContainerPath $containerPath -Label "Exchange container ACL ($containerPath)"
+        if (-not $containerInfo.Found) { continue }
+
+        foreach ($ace in $containerInfo.PrivilegedAces) { $combinedAces.Add($ace) }
+
+        foreach ($delegationKey in $containerInfo.DelegationPrincipals.Keys) {
+            $delegatedUser = $containerInfo.DelegationPrincipals[$delegationKey]
+            if ($combinedDelegation.ContainsKey($delegationKey)) {
+                $existingSources = @()
+                if ($combinedDelegation[$delegationKey].DelegationSource) {
+                    $existingSources = @($combinedDelegation[$delegationKey].DelegationSource -split "; ")
+                }
+                if ($existingSources -notcontains $delegatedUser.DelegationSource) {
+                    $combinedDelegation[$delegationKey].DelegationSource = "$($combinedDelegation[$delegationKey].DelegationSource); $($delegatedUser.DelegationSource)"
+                }
+            } else {
+                $combinedDelegation[$delegationKey] = $delegatedUser
+            }
+        }
+    }
+
+    $script:ExchangePrivilegedAces       = @($combinedAces)
+    $script:ExchangeDelegationPrincipals = $combinedDelegation
+
+    Write-Log -Message "Section 5b: $($script:ExchangePrivilegedAces.Count) privileged ACEs, $($script:ExchangeDelegationPrincipals.Count) users resolved via delegation across Exchange containers" -Level OK
+} catch {
+    Write-Log -Message "Section 5b failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#            UNIFIED PRIVILEGED USERS LIST (GROUPS + ACL DELEGATIONS)        #
+################################################################################
+
+Write-Log -Message "Building the unified privileged users list (group membership + ACL delegation)" -Level INFO
+
+$script:UnifiedPrivilegedUsers = New-Object System.Collections.ArrayList
+# lowercased DN or samAccountName -> the (single, shared) object reference
+# held in UnifiedPrivilegedUsers, so a duplicate found under either key
+# lands on the same record and its fields get merged rather than dropped.
+$script:UnifiedIndex = @{}
+
+function Add-ToUnifiedList {
+    param(
+        [Parameter(Mandatory = $true)]
+        $UserObject
+    )
+
+    $dnKey  = ([string]$UserObject.DistinguishedName).ToLowerInvariant()
+    $samKey = ([string]$UserObject.SamAccountName).ToLowerInvariant()
+
+    $existingUser = $null
+    if ($script:UnifiedIndex.ContainsKey($dnKey))  { $existingUser = $script:UnifiedIndex[$dnKey] }
+    elseif ($script:UnifiedIndex.ContainsKey($samKey)) { $existingUser = $script:UnifiedIndex[$samKey] }
+
+    if ($existingUser) {
+        # Merge in whichever of the two facts (group membership, ACL
+        # delegation) this incoming copy carries that the kept record does
+        # not already have, so a user privileged both ways keeps both.
+        $incomingMembership = ""
+        if ($UserObject.PSObject.Properties.Match("MembershipDetails").Count -gt 0) {
+            $incomingMembership = $UserObject.MembershipDetails
+        }
+        if ($incomingMembership -and -not $existingUser.MembershipDetails) {
+            $existingUser.MembershipDetails = $incomingMembership
+        }
+
+        $incomingDelegation = ""
+        if ($UserObject.PSObject.Properties.Match("DelegationSource").Count -gt 0) {
+            $incomingDelegation = $UserObject.DelegationSource
+        }
+        if ($incomingDelegation) {
+            $incomingSources = @($incomingDelegation -split "; ")
+            $mergedSources    = @()
+            if ($existingUser.DelegationSource) { $mergedSources = @($existingUser.DelegationSource -split "; ") }
+            foreach ($src in $incomingSources) {
+                if ($mergedSources -notcontains $src) { $mergedSources += $src }
+            }
+            $existingUser.DelegationSource = ($mergedSources -join "; ")
+        }
+
+        return
+    }
+
+    if (-not ($UserObject.PSObject.Properties.Match("MembershipDetails").Count -gt 0)) {
+        Add-Member -InputObject $UserObject -MemberType NoteProperty -Name "MembershipDetails" -Value "" -Force
+    }
+    if (-not ($UserObject.PSObject.Properties.Match("DelegationSource").Count -gt 0)) {
+        Add-Member -InputObject $UserObject -MemberType NoteProperty -Name "DelegationSource" -Value "" -Force
+    }
+
+    [void]$script:UnifiedPrivilegedUsers.Add($UserObject)
+    $script:UnifiedIndex[$dnKey]  = $UserObject
+    $script:UnifiedIndex[$samKey] = $UserObject
+}
+
+try {
+    foreach ($userObject in $script:AllUsers) {
+        if ($userObject.PSObject.Properties.Match("MembershipDetails").Count -gt 0) {
+            Add-ToUnifiedList -UserObject $userObject
+        }
+    }
+
+    foreach ($delegationMap in @($script:RootDelegationPrincipals, $script:DcOuDelegationPrincipals, $script:ExchangeDelegationPrincipals)) {
+        foreach ($delegationKey in $delegationMap.Keys) {
+            Add-ToUnifiedList -UserObject $delegationMap[$delegationKey]
+        }
+    }
+
+    Write-Log -Message "Unified privileged users list: $($script:UnifiedPrivilegedUsers.Count) unique accounts" -Level OK
+} catch {
+    Write-Log -Message "Unified privileged users list build failed: $($_.Exception.Message)" -Level ERROR
+}
+
+# The dedicated principal searcher is done for the ACL-delegation sections.
+try { $script:PrincipalSearcher.Dispose() } catch { }
