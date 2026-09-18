@@ -1734,3 +1734,420 @@ try {
 } catch {
     Write-Log -Message "Section 8 failed: $($_.Exception.Message)" -Level ERROR
 }
+
+################################################################################
+#           SID RESOLUTION INFRASTRUCTURE (USED BY SECTIONS 8 & 9)           #
+################################################################################
+
+Show-StepProgress -Status "Building SID resolution map"
+Write-Log -Message "Building well-known/domain SID resolution map" -Level INFO
+
+function Convert-ObjectSidToString {
+    <#
+        objectSid can come back from ADSI as a byte[], a boxed generic
+        array (COM interop), or already as a string; normalize all three
+        to the S-1-... textual form.
+    #>
+    param(
+        [AllowNull()]
+        $RawSid
+    )
+
+    if ($null -eq $RawSid) { return $null }
+
+    try {
+        if ($RawSid -is [string]) { return $RawSid }
+
+        if ($RawSid -is [byte[]]) {
+            return (New-Object System.Security.Principal.SecurityIdentifier($RawSid, 0)).Value
+        }
+
+        $byteArray = New-Object byte[] ($RawSid.Count)
+        for ($i = 0; $i -lt $RawSid.Count; $i++) { $byteArray[$i] = [byte]$RawSid[$i] }
+        return (New-Object System.Security.Principal.SecurityIdentifier($byteArray, 0)).Value
+    } catch {
+        return $null
+    }
+}
+
+function Get-DomainSidString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$NamingContextDn
+    )
+    try {
+        $ncEntry = [ADSI]("LDAP://" + $NamingContextDn)
+        $rawSid = $ncEntry.Properties["objectSid"][0]
+        return Convert-ObjectSidToString -RawSid $rawSid
+    } catch {
+        return $null
+    }
+}
+
+function Get-NetBiosNameForNamingContext {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$NamingContextDn
+    )
+    try {
+        $partitionsPath = "CN=Partitions," + $script:ConfigurationNamingContext
+        $crossRefSearchRoot = [ADSI]("LDAP://" + $partitionsPath)
+        $crossRefSearcher = New-Object System.DirectoryServices.DirectorySearcher($crossRefSearchRoot)
+        try {
+            $escapedNc = ConvertTo-LdapFilterValue -Value $NamingContextDn
+            $crossRefSearcher.Filter = "(&(objectClass=crossRef)(nCName=$escapedNc))"
+            [void]$crossRefSearcher.PropertiesToLoad.AddRange(@("netbiosname"))
+            $found = $crossRefSearcher.FindOne()
+            if ($found) {
+                return Get-AdProp -Entry $found.Properties -Name "netbiosname" -Default $null
+            }
+        } finally {
+            $crossRefSearcher.Dispose()
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+function Initialize-WellKnownSidFallbackMap {
+    <#
+        Universal and local-account well-known SIDs are a small, stable,
+        publicly documented set and are hardcoded below. BUILTIN aliases
+        (S-1-5-32-544..582) are instead resolved live through NTAccount
+        translation, which works locally on any Windows host without
+        needing AD - the OS is the authoritative source for those names
+        rather than a hand-typed table; a RID this OS does not define
+        falls back to a plain "BUILTIN\Alias-<RID>" label instead of a
+        guessed name.
+    #>
+    $map = @{
+        "S-1-0-0"            = "NULL SID"
+        "S-1-1-0"            = "Everyone"
+        "S-1-3-0"            = "CREATOR OWNER"
+        "S-1-3-1"            = "CREATOR GROUP"
+        "S-1-5-2"            = "NT AUTHORITY\NETWORK"
+        "S-1-5-3"            = "NT AUTHORITY\BATCH"
+        "S-1-5-4"            = "NT AUTHORITY\INTERACTIVE"
+        "S-1-5-6"            = "NT AUTHORITY\SERVICE"
+        "S-1-5-7"            = "NT AUTHORITY\ANONYMOUS LOGON"
+        "S-1-5-8"            = "NT AUTHORITY\PROXY"
+        "S-1-5-9"            = "NT AUTHORITY\ENTERPRISE DOMAIN CONTROLLERS"
+        "S-1-5-10"           = "NT AUTHORITY\SELF"
+        "S-1-5-11"           = "NT AUTHORITY\Authenticated Users"
+        "S-1-5-12"           = "NT AUTHORITY\RESTRICTED"
+        "S-1-5-13"           = "NT AUTHORITY\TERMINAL SERVER USER"
+        "S-1-5-14"           = "NT AUTHORITY\REMOTE INTERACTIVE LOGON"
+        "S-1-5-15"           = "NT AUTHORITY\THIS ORGANIZATION"
+        "S-1-5-17"           = "NT AUTHORITY\IUSR"
+        "S-1-5-18"           = "NT AUTHORITY\SYSTEM"
+        "S-1-5-19"           = "NT AUTHORITY\LOCAL SERVICE"
+        "S-1-5-20"           = "NT AUTHORITY\NETWORK SERVICE"
+        "S-1-5-33"           = "NT AUTHORITY\WRITE RESTRICTED"
+        "S-1-5-80-0"         = "NT SERVICE\ALL SERVICES"
+        "S-1-5-84-0-0-0-0-0" = "Font Driver Host\UMFD-0"
+        "S-1-5-90-0"         = "Window Manager\DWM-1"
+        "S-1-5-1000"         = "NT AUTHORITY\Other Organization"
+        "S-1-5-113"          = "NT AUTHORITY\Local account"
+        "S-1-5-114"          = "NT AUTHORITY\Local account and member of Administrators group"
+        "S-1-15-2-1"         = "APPLICATION PACKAGE AUTHORITY\ALL APPLICATION PACKAGES"
+        "S-1-18-1"           = "Authentication authority asserted identity"
+        "S-1-18-2"           = "Service asserted identity"
+    }
+
+    for ($rid = 544; $rid -le 582; $rid++) {
+        $builtinSid = "S-1-5-32-$rid"
+        $resolvedName = $null
+        try {
+            $sidObj = New-Object System.Security.Principal.SecurityIdentifier($builtinSid)
+            $resolvedName = $sidObj.Translate([System.Security.Principal.NTAccount]).Value
+        } catch {
+            $resolvedName = $null
+        }
+        if ($resolvedName) {
+            $map[$builtinSid] = $resolvedName
+        } else {
+            $map[$builtinSid] = "BUILTIN\Alias-$rid"
+        }
+    }
+
+    return $map
+}
+
+# Domain-relative well-known RIDs, applied below to both the current domain
+# SID and the forest root domain SID.
+$script:DomainRidNames = @{
+    500 = "Administrator"
+    501 = "Guest"
+    502 = "krbtgt"
+    512 = "Domain Admins"
+    513 = "Domain Users"
+    514 = "Domain Guests"
+    515 = "Domain Computers"
+    516 = "Domain Controllers"
+    517 = "Cert Publishers"
+    518 = "Schema Admins"
+    519 = "Enterprise Admins"
+    520 = "Group Policy Creator Owners"
+    521 = "Read-only Domain Controllers"
+    525 = "Protected Users"
+    526 = "Key Admins"
+    527 = "Enterprise Key Admins"
+}
+
+$script:CurrentDomainSid        = $null
+$script:CurrentDomainNetBios    = "DOMAIN"
+$script:RootDomainNamingContext = $null
+$script:ForestRootDomainSid     = $null
+$script:ForestRootDomainNetBios = "FORESTROOT"
+$script:WellKnownSidMap         = @{}
+$script:SidResolutionCache      = @{}
+
+try {
+    $script:CurrentDomainSid = Get-DomainSidString -NamingContextDn $script:BaseDN
+    $currentNetBios = Get-NetBiosNameForNamingContext -NamingContextDn $script:BaseDN
+    if ($currentNetBios) { $script:CurrentDomainNetBios = $currentNetBios }
+
+    $rootDseForForest = [ADSI]"LDAP://RootDSE"
+    $script:RootDomainNamingContext = $rootDseForForest.Properties["rootDomainNamingContext"][0]
+
+    if ($script:RootDomainNamingContext) {
+        $script:ForestRootDomainSid = Get-DomainSidString -NamingContextDn $script:RootDomainNamingContext
+        $forestNetBios = Get-NetBiosNameForNamingContext -NamingContextDn $script:RootDomainNamingContext
+        if ($forestNetBios) { $script:ForestRootDomainNetBios = $forestNetBios }
+    }
+
+    $script:WellKnownSidMap = Initialize-WellKnownSidFallbackMap
+
+    foreach ($ridEntry in $script:DomainRidNames.GetEnumerator()) {
+        if ($script:CurrentDomainSid) {
+            $script:WellKnownSidMap["$($script:CurrentDomainSid)-$($ridEntry.Key)"] = "$($script:CurrentDomainNetBios)\$($ridEntry.Value)"
+        }
+        if ($script:ForestRootDomainSid -and $script:ForestRootDomainSid -ne $script:CurrentDomainSid) {
+            $script:WellKnownSidMap["$($script:ForestRootDomainSid)-$($ridEntry.Key)"] = "$($script:ForestRootDomainNetBios)\$($ridEntry.Value)"
+        }
+    }
+
+    Write-Log -Message "SID resolution map ready ($($script:WellKnownSidMap.Count) well-known entries)" -Level OK
+} catch {
+    Write-Log -Message "SID resolution map build failed: $($_.Exception.Message)" -Level WARN
+}
+
+function Resolve-Sid {
+    <#
+        Resolution order: cache, well-known/domain-RID map, LDAP lookup by
+        objectSid (works off a domain controller too), then NTAccount
+        translation for per-service/per-package virtual SIDs
+        (S-1-5-80-<hash>, S-1-5-99-<hash>). An orphaned SID that none of
+        these resolve is reported as such rather than guessed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Sid
+    )
+
+    if ($script:SidResolutionCache.ContainsKey($Sid)) {
+        return $script:SidResolutionCache[$Sid]
+    }
+
+    $resolvedName = $null
+
+    if ($script:WellKnownSidMap.ContainsKey($Sid)) {
+        $resolvedName = $script:WellKnownSidMap[$Sid]
+    }
+
+    if (-not $resolvedName) {
+        try {
+            $escapedSid = ConvertTo-LdapFilterValue -Value $Sid
+            $sidSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+            $sidSearcher = New-Object System.DirectoryServices.DirectorySearcher($sidSearchRoot)
+            try {
+                $sidSearcher.Filter = "(objectSid=$escapedSid)"
+                [void]$sidSearcher.PropertiesToLoad.AddRange(@("samaccountname"))
+                $found = $sidSearcher.FindOne()
+                if ($found) {
+                    $sam = Get-AdProp -Entry $found.Properties -Name "samaccountname" -Default $null
+                    if ($sam) { $resolvedName = "$($script:CurrentDomainNetBios)\$sam" }
+                }
+            } finally {
+                $sidSearcher.Dispose()
+            }
+        } catch {
+            $resolvedName = $null
+        }
+    }
+
+    if (-not $resolvedName -and $Sid -match '^S-1-5-(80|99)-') {
+        try {
+            $sidObj = New-Object System.Security.Principal.SecurityIdentifier($Sid)
+            $resolvedName = $sidObj.Translate([System.Security.Principal.NTAccount]).Value
+        } catch {
+            $resolvedName = $null
+        }
+    }
+
+    if (-not $resolvedName) { $resolvedName = "$Sid [unresolved]" }
+
+    $script:SidResolutionCache[$Sid] = $resolvedName
+    return $resolvedName
+}
+
+Write-Log -Message "Resolving principals for User Rights Assignment rows" -Level INFO
+try {
+    foreach ($row in $script:UserRightsAssignments) {
+        $resolvedPrincipals = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($principalToken in $row.Principals) {
+            if ($principalToken.StartsWith("*")) {
+                $resolvedPrincipals.Add((Resolve-Sid -Sid $principalToken.Substring(1)))
+            } else {
+                $resolvedPrincipals.Add($principalToken)
+            }
+        }
+        Add-Member -InputObject $row -MemberType NoteProperty -Name "PrincipalsResolved" -Value (@($resolvedPrincipals)) -Force
+    }
+    Write-Log -Message "PrincipalsResolved added to $($script:UserRightsAssignments.Count) User Rights Assignment rows" -Level OK
+} catch {
+    Write-Log -Message "PrincipalsResolved enrichment failed: $($_.Exception.Message)" -Level WARN
+}
+
+################################################################################
+#              SECTION 9 - TIER-LEVEL GPO COVERAGE AND CONFLICTS             #
+################################################################################
+
+Show-StepProgress -Status "Section 9: Analyzing tier-level GPO coverage"
+
+$script:TierGpoCoverage = [PSCustomObject]@{
+    TierGpo          = $null
+    CommonPrincipals = @()
+    OUsNotApplied    = @()
+    ConflictGpos     = @()
+    ConflictOUs      = @()
+}
+
+if (-not $script:RsatAvailable) {
+    Write-Log -Message "Section 9 skipped: $($script:RsatWarning)" -Level WARN
+} else {
+    Write-Log -Message "Section 9: analyzing tier-level GPO coverage and conflicts" -Level INFO
+
+    try {
+        # GPODn -> { Privilege -> HashSet[string] of raw SIDs (no '*' prefix) },
+        # so the five deny-right principal sets for a GPO can be intersected.
+        $gpoDenyRights = @{}
+
+        foreach ($row in $script:UserRightsAssignments) {
+            if ($script:DenyLogonRights -notcontains $row.Privilege) { continue }
+
+            if (-not $gpoDenyRights.ContainsKey($row.GPODn)) {
+                $gpoDenyRights[$row.GPODn] = @{}
+            }
+
+            $sidSet = New-Object 'System.Collections.Generic.HashSet[string]'
+            foreach ($principalToken in $row.Principals) {
+                $rawToken = $principalToken
+                if ($rawToken.StartsWith("*")) { $rawToken = $rawToken.Substring(1) }
+                [void]$sidSet.Add($rawToken)
+            }
+            $gpoDenyRights[$row.GPODn][$row.Privilege] = $sidSet
+        }
+
+        # A "tier GPO" is the one GPO that configures all five deny-logon
+        # rights together; only the first one found is treated as the tier
+        # GPO, mirroring the spec's single-GPO tiering model.
+        $tierGpoDn  = $null
+        $commonSids = @()
+
+        foreach ($gpoDn in $gpoDenyRights.Keys) {
+            $rightsPresent = $gpoDenyRights[$gpoDn].Keys
+            $hasAllFive = $true
+            foreach ($denyRight in $script:DenyLogonRights) {
+                if ($rightsPresent -notcontains $denyRight) { $hasAllFive = $false; break }
+            }
+            if (-not $hasAllFive) { continue }
+
+            $tierGpoDn = $gpoDn
+
+            $intersection = $null
+            foreach ($denyRight in $script:DenyLogonRights) {
+                $currentSet = $gpoDenyRights[$gpoDn][$denyRight]
+                if ($null -eq $intersection) {
+                    $intersection = [System.Collections.Generic.HashSet[string]]::new($currentSet)
+                } else {
+                    $intersection.IntersectWith($currentSet)
+                }
+            }
+            $commonSids = @($intersection)
+            break
+        }
+
+        if (-not $tierGpoDn) {
+            Write-Log -Message "Section 9: no single GPO configures all five deny-logon rights together. Verify whether the same principal is instead configured for these five rights spread across multiple GPOs." -Level WARN
+        } else {
+            $tierGpoObject = $script:Gpos | Where-Object { $_.DistinguishedName -eq $tierGpoDn } | Select-Object -First 1
+            $script:TierGpoCoverage.TierGpo          = $tierGpoObject
+            $script:TierGpoCoverage.CommonPrincipals = @($commonSids | ForEach-Object { Resolve-Sid -Sid $_ })
+
+            # Coverage/conflict analysis works off each OU's own direct GPO
+            # links (Get-GPInheritance), ordered by link Order (1 = highest
+            # precedence, applied last). Cross-level precedence against
+            # parent-OU/domain/site links is not modeled here.
+            $ousNotApplied = New-Object System.Collections.ArrayList
+            $conflictGpos  = New-Object System.Collections.ArrayList
+            $conflictOUs   = New-Object System.Collections.ArrayList
+
+            try {
+                $allOUs = Get-ADOrganizationalUnit -Filter * -ErrorAction Stop
+
+                foreach ($ou in $allOUs) {
+                    try {
+                        $inheritance = Get-GPInheritance -Target $ou.DistinguishedName -ErrorAction Stop
+                        $sortedLinks = @($inheritance.GpoLinks | Where-Object { $_.Enabled } | Sort-Object Order)
+
+                        $tierGpoOrder = $null
+                        foreach ($link in $sortedLinks) {
+                            $linkedGpo = $script:Gpos | Where-Object {
+                                $_.Name -and $_.Name.Trim('{', '}').Equals($link.GpoId.ToString(), [StringComparison]::OrdinalIgnoreCase)
+                            } | Select-Object -First 1
+
+                            if ($linkedGpo -and $linkedGpo.DistinguishedName -eq $tierGpoDn) {
+                                $tierGpoOrder = $link.Order
+                                break
+                            }
+                        }
+
+                        if ($null -eq $tierGpoOrder) {
+                            [void]$ousNotApplied.Add($ou.DistinguishedName)
+                        } else {
+                            foreach ($link in $sortedLinks) {
+                                if ($link.Order -ge $tierGpoOrder) { continue }
+
+                                $precedingGpo = $script:Gpos | Where-Object {
+                                    $_.Name -and $_.Name.Trim('{', '}').Equals($link.GpoId.ToString(), [StringComparison]::OrdinalIgnoreCase)
+                                } | Select-Object -First 1
+
+                                if ($precedingGpo -and $precedingGpo.DistinguishedName -ne $tierGpoDn) {
+                                    $precedingDenyRights = $gpoDenyRights[$precedingGpo.DistinguishedName]
+                                    if ($precedingDenyRights -and $precedingDenyRights.Count -gt 0) {
+                                        [void]$conflictGpos.Add($precedingGpo.DistinguishedName)
+                                        [void]$conflictOUs.Add($ou.DistinguishedName)
+                                    }
+                                }
+                            }
+                        }
+                    } catch {
+                        Write-Log -Message "Section 9: GPO inheritance check failed for OU '$($ou.DistinguishedName)': $($_.Exception.Message)" -Level WARN
+                    }
+                }
+            } catch {
+                Write-Log -Message "Section 9: unable to enumerate organizational units: $($_.Exception.Message)" -Level WARN
+            }
+
+            $script:TierGpoCoverage.OUsNotApplied = @($ousNotApplied)
+            $script:TierGpoCoverage.ConflictGpos  = @($conflictGpos | Select-Object -Unique)
+            $script:TierGpoCoverage.ConflictOUs   = @($conflictOUs | Select-Object -Unique)
+
+            Write-Log -Message "Section 9: tier GPO identified ('$($tierGpoObject.DisplayName)'), $($script:TierGpoCoverage.OUsNotApplied.Count) OUs not covered, $($script:TierGpoCoverage.ConflictOUs.Count) OUs with a conflicting GPO" -Level OK
+        }
+    } catch {
+        Write-Log -Message "Section 9 failed: $($_.Exception.Message)" -Level ERROR
+    }
+}
