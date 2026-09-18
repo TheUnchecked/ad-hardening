@@ -432,3 +432,351 @@ try {
 
 # Reference instant for this collection run.
 $script:CollectionStartUtc = [DateTime]::UtcNow
+
+################################################################################
+#                     GROUP MEMBERSHIP HELPERS (SECTIONS 1-3)                #
+################################################################################
+
+# Built-in and common privileged groups tracked across the domain. Names only:
+# each one is resolved against AD in Section 1, so a group absent from this
+# particular domain (e.g. Hyper-V Administrators on a DC without Hyper-V) is
+# simply not found rather than causing an error.
+$script:MonitoredGroups = @(
+    "Account Operators",
+    "Administrators",
+    "Backup Operators",
+    "Cert Publishers",
+    "Domain Admins",
+    "Enterprise Admins",
+    "Schema Admins",
+    "Server Operators",
+    "Print Operators",
+    "Replicator",
+    "DnsAdmins",
+    "DnsUpdateProxy",
+    "Group Policy Creator Owners",
+    "Hyper-V Administrators",
+    "Key Admins",
+    "Enterprise Key Admins",
+    "Domain Controllers",
+    "Cloneable Domain Controllers",
+    "Read-only Domain Controllers",
+    "Enterprise Read-only Domain Controllers",
+    "Incoming Forest Trust Builders",
+    "Performance Log Users",
+    "Performance Monitor Users",
+    "Debugger Users",
+    "Distributed COM Users",
+    "Remote Desktop Users",
+    "Remote Management Users",
+    "Storage Replica Administrators",
+    "System Managed Accounts Group",
+    "Access Control Assistance Operators",
+    "Allowed RODC Password Replication Group",
+    "Denied RODC Password Replication Group",
+    "Certificate Service DCOM Access",
+    "Cryptographic Operators",
+    "DHCP Administrators",
+    "DHCP Users",
+    "Event Log Readers",
+    "IIS_IUSRS",
+    "Network Configuration Operators",
+    "Pre-Windows 2000 Compatible Access",
+    "RAS and IAS Servers",
+    "RDS Endpoint Servers",
+    "RDS Management Servers",
+    "RDS Remote Access Servers",
+    "Terminal Server License Servers",
+    "Windows Authorization Access Group",
+    "WinRMRemoteWMIUsers_"
+)
+
+function Get-TransitiveGroupMembership {
+    <#
+        Breadth-first resolution of a principal's full group closure. Queue +
+        visited set prevent infinite loops on circular nesting (A member of B
+        member of A); GroupCache is passed in from script scope so a group's
+        own memberOf is only ever read from AD once per run, no matter how
+        many users end up nested inside it.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$InitialGroups,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Hashtable]$GroupCache
+    )
+
+    $resolved = @{}
+    $visited  = New-Object 'System.Collections.Generic.HashSet[string]'
+    $queue    = New-Object 'System.Collections.Generic.Queue[string]'
+
+    foreach ($groupDn in $InitialGroups) {
+        if ([string]::IsNullOrWhiteSpace($groupDn)) { continue }
+        $key = $groupDn.ToLowerInvariant()
+        if (-not $visited.Contains($key)) {
+            [void]$visited.Add($key)
+            $resolved[$key] = [PSCustomObject]@{ DN = $groupDn; Relationship = "Direct" }
+            $queue.Enqueue($groupDn)
+        }
+    }
+
+    while ($queue.Count -gt 0) {
+        $currentDn  = $queue.Dequeue()
+        $currentKey = $currentDn.ToLowerInvariant()
+
+        if (-not $GroupCache.ContainsKey($currentKey)) {
+            $parentGroups = @()
+            try {
+                $groupEntry    = [ADSI]("LDAP://" + $currentDn)
+                $memberOfProp  = $groupEntry.Properties["memberOf"]
+                if ($memberOfProp) {
+                    foreach ($parentValue in $memberOfProp) {
+                        $parentGroups += [string]$parentValue
+                    }
+                }
+            } catch {
+                $parentGroups = @()
+            }
+            $GroupCache[$currentKey] = $parentGroups
+        }
+
+        foreach ($parentDn in $GroupCache[$currentKey]) {
+            if ([string]::IsNullOrWhiteSpace($parentDn)) { continue }
+            $parentKey = $parentDn.ToLowerInvariant()
+            if (-not $visited.Contains($parentKey)) {
+                [void]$visited.Add($parentKey)
+                $resolved[$parentKey] = [PSCustomObject]@{ DN = $parentDn; Relationship = "Nested" }
+                $queue.Enqueue($parentDn)
+            }
+        }
+    }
+
+    return $resolved
+}
+
+################################################################################
+#              SECTION 1 - MONITORED PRIVILEGED GROUPS RESOLUTION            #
+################################################################################
+
+Show-StepProgress -Status "Section 1: Resolving monitored privileged groups"
+Write-Log -Message "Section 1: resolving monitored privileged groups against the domain" -Level INFO
+
+# CN found in AD -> DN
+$script:MonitoredGroupsFound    = @{}
+# CN -> running membership counter, filled in during Section 3
+$script:MonitoredGroupsCounters = @{}
+# lowercased DN -> CN, the O(1) lookup Section 3 needs per closure member
+$script:MonitoredGroupsByDn     = @{}
+
+try {
+    $cnFilterParts = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($groupName in $script:MonitoredGroups) {
+        $escapedName = ConvertTo-LdapFilterValue -Value $groupName
+        $cnFilterParts.Add("(cn=$escapedName)")
+    }
+    $groupFilter = "(&(objectCategory=group)(|{0}))" -f ($cnFilterParts -join "")
+
+    $groupSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+    $groupSearcher = New-Object System.DirectoryServices.DirectorySearcher($groupSearchRoot)
+    try {
+        $groupSearcher.Filter   = $groupFilter
+        $groupSearcher.PageSize = 500
+        [void]$groupSearcher.PropertiesToLoad.AddRange(@("cn", "distinguishedName"))
+
+        $groupResults = $groupSearcher.FindAll()
+        try {
+            foreach ($groupResult in $groupResults) {
+                $cn = Get-AdProp -Entry $groupResult.Properties -Name "cn" -Default $null
+                $dn = Get-AdProp -Entry $groupResult.Properties -Name "distinguishedname" -Default $null
+                if ($cn -and $dn) {
+                    $script:MonitoredGroupsFound[$cn]    = $dn
+                    $script:MonitoredGroupsCounters[$cn] = 0
+                    $script:MonitoredGroupsByDn[$dn.ToLowerInvariant()] = $cn
+                }
+            }
+        } finally {
+            $groupResults.Dispose()
+        }
+    } finally {
+        $groupSearcher.Dispose()
+    }
+
+    Write-Log -Message "Section 1: $($script:MonitoredGroupsFound.Count) of $($script:MonitoredGroups.Count) monitored groups found in the domain" -Level OK
+} catch {
+    Write-Log -Message "Section 1 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                   SECTION 2 - DOMAIN USER ACCOUNT ENUMERATION              #
+################################################################################
+
+Show-StepProgress -Status "Section 2: Enumerating domain user accounts"
+Write-Log -Message "Section 2: enumerating all domain user accounts" -Level INFO
+
+$script:AllUsers   = New-Object System.Collections.ArrayList
+# lowercased distinguishedName -> user object
+$script:UsersByDn  = @{}
+# lowercased samAccountName -> user object
+$script:UsersBySam = @{}
+
+try {
+    $userSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+    $userSearcher = New-Object System.DirectoryServices.DirectorySearcher($userSearchRoot)
+    try {
+        $userSearcher.Filter       = "(&(objectCategory=person)(objectClass=user))"
+        $userSearcher.PageSize     = 1000
+        $userSearcher.CacheResults = $false
+        [void]$userSearcher.PropertiesToLoad.AddRange(@(
+            "samaccountname", "pwdlastset", "memberof", "whencreated",
+            "lastlogontimestamp", "distinguishedname", "useraccountcontrol",
+            "accountexpires", "admincount", "sidhistory"
+        ))
+
+        $userResults = $userSearcher.FindAll()
+        try {
+            $nowUtc = [DateTime]::UtcNow
+
+            foreach ($userResult in $userResults) {
+                $props = $userResult.Properties
+
+                $dn  = Get-AdProp -Entry $props -Name "distinguishedname" -Default "N/A"
+                $sam = Get-AdProp -Entry $props -Name "samaccountname" -Default "N/A"
+
+                $uac = 0
+                try {
+                    if ($props.Contains("useraccountcontrol") -and $props["useraccountcontrol"].Count -gt 0) {
+                        $uac = [Int64]$props["useraccountcontrol"][0]
+                    }
+                } catch {
+                    $uac = 0
+                }
+                $isDisabled = [bool]($uac -band 0x2)
+
+                # accountExpires is only meaningful when set, positive, and
+                # below the "never expires" sentinel (Int64.MaxValue).
+                $isExpired = $false
+                try {
+                    if ($props.Contains("accountexpires") -and $props["accountexpires"].Count -gt 0) {
+                        $accountExpiresRaw = [Int64]$props["accountexpires"][0]
+                        if ($accountExpiresRaw -gt 0 -and $accountExpiresRaw -lt [Int64]::MaxValue) {
+                            $expiresDate = [DateTime]::FromFileTimeUtc($accountExpiresRaw)
+                            if ($expiresDate -lt $nowUtc) { $isExpired = $true }
+                        }
+                    }
+                } catch {
+                    $isExpired = $false
+                }
+
+                $adminCountValue = 0
+                try {
+                    if ($props.Contains("admincount") -and $props["admincount"].Count -gt 0) {
+                        $adminCountValue = [Int32]$props["admincount"][0]
+                    }
+                } catch {
+                    $adminCountValue = 0
+                }
+                $isProtectedByAdminSDHolder = [bool]($adminCountValue -eq 1)
+
+                $memberOf = @()
+                if ($props.Contains("memberof")) {
+                    foreach ($memberOfValue in $props["memberof"]) {
+                        $memberOf += [string]$memberOfValue
+                    }
+                }
+
+                $pwdLastSetInfo = Get-AdDate -Entry $props -Name "pwdlastset" -FileTime
+                $lastLogonInfo  = Get-AdDate -Entry $props -Name "lastlogontimestamp" -FileTime
+
+                $base = [ordered]@{
+                    DistinguishedName          = $dn
+                    SamAccountName             = $sam
+                    PwdLastSetDisplay          = $pwdLastSetInfo.Display
+                    PwdLastSetIso              = $pwdLastSetInfo.Iso
+                    LastLogonTimestampDisplay  = $lastLogonInfo.Display
+                    LastLogonTimestampIso      = $lastLogonInfo.Iso
+                    MemberOf                   = $memberOf
+                    IsDisabled                 = $isDisabled
+                    IsExpired                  = $isExpired
+                    IsProtectedByAdminSDHolder = $isProtectedByAdminSDHolder
+                    AdminCount                 = $adminCountValue
+                }
+
+                $userObject = New-AccountObject -Base $base -Result $userResult
+
+                [void]$script:AllUsers.Add($userObject)
+
+                if ($dn -and $dn -ne "N/A") {
+                    $script:UsersByDn[$dn.ToLowerInvariant()] = $userObject
+                }
+                if ($sam -and $sam -ne "N/A") {
+                    $script:UsersBySam[$sam.ToLowerInvariant()] = $userObject
+                }
+            }
+        } finally {
+            $userResults.Dispose()
+        }
+    } finally {
+        $userSearcher.Dispose()
+    }
+
+    Write-Log -Message "Section 2: $($script:AllUsers.Count) domain user accounts enumerated" -Level OK
+} catch {
+    Write-Log -Message "Section 2 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#            SECTION 3 - TRANSITIVE PRIVILEGED MEMBERSHIP RESOLUTION         #
+################################################################################
+
+Show-StepProgress -Status "Section 3: Resolving transitive privileged group membership"
+Write-Log -Message "Section 3: resolving transitive group membership for $($script:AllUsers.Count) users" -Level INFO
+
+# lowercased monitored-group DN -> ArrayList of privileged user objects.
+# This reverse index lets Sections 4/5/5b resolve ACL delegations that name a
+# group in O(1) instead of re-walking every user's membership again.
+$script:PrivilegedUsersByGroup = @{}
+# Shared across every user so a given group's memberOf is read from AD once.
+$script:GroupMemberOfCache     = @{}
+
+try {
+    foreach ($userObject in $script:AllUsers) {
+        $initialGroups = @()
+        if ($userObject.MemberOf) { $initialGroups = $userObject.MemberOf }
+
+        $closure = Get-TransitiveGroupMembership -InitialGroups $initialGroups -GroupCache $script:GroupMemberOfCache
+
+        $membershipDetailParts = New-Object 'System.Collections.Generic.List[string]'
+        $isPrivileged = $false
+
+        foreach ($closureKey in $closure.Keys) {
+            if (-not $script:MonitoredGroupsByDn.ContainsKey($closureKey)) { continue }
+
+            $groupCn      = $script:MonitoredGroupsByDn[$closureKey]
+            $relationship = $closure[$closureKey].Relationship
+            $membershipDetailParts.Add("$groupCn ($relationship)")
+
+            $isPrivileged = $true
+
+            if ($script:MonitoredGroupsCounters.ContainsKey($groupCn)) {
+                $script:MonitoredGroupsCounters[$groupCn]++
+            }
+
+            if (-not $script:PrivilegedUsersByGroup.ContainsKey($closureKey)) {
+                $script:PrivilegedUsersByGroup[$closureKey] = New-Object System.Collections.ArrayList
+            }
+            [void]$script:PrivilegedUsersByGroup[$closureKey].Add($userObject)
+        }
+
+        if ($isPrivileged) {
+            $sortedDetails = $membershipDetailParts | Sort-Object
+            Add-Member -InputObject $userObject -MemberType NoteProperty -Name "MembershipDetails" -Value ($sortedDetails -join "; ") -Force
+        }
+    }
+
+    $privilegedUserCount = ($script:AllUsers | Where-Object { $_.PSObject.Properties.Match("MembershipDetails").Count -gt 0 }).Count
+    Write-Log -Message "Section 3: $privilegedUserCount users found in monitored privileged groups (direct or nested)" -Level OK
+} catch {
+    Write-Log -Message "Section 3 failed: $($_.Exception.Message)" -Level ERROR
+}
