@@ -1262,3 +1262,475 @@ try {
 
 # The dedicated principal searcher is done for the ACL-delegation sections.
 try { $script:PrincipalSearcher.Dispose() } catch { }
+
+################################################################################
+#                          DOMAIN CONFIGURATION FACTS                        #
+################################################################################
+
+Show-StepProgress -Status "Collecting domain-wide configuration facts"
+Write-Log -Message "Collecting domain configuration facts: Recycle Bin, last backup, functional levels, quotas, tombstone lifetime" -Level INFO
+
+# msDS-Behavior-Version conversion table. Values 8/9 are reserved/unused by
+# Microsoft (Server 2016 is 7, the next assigned value is Server 2025 at 10).
+$script:FunctionalLevelMap = @{
+    0  = "Windows 2000"
+    1  = "Windows Server 2003 Interim"
+    2  = "Windows Server 2003"
+    3  = "Windows Server 2008"
+    4  = "Windows Server 2008 R2"
+    5  = "Windows Server 2012"
+    6  = "Windows Server 2012 R2"
+    7  = "Windows Server 2016"
+    8  = "Reserved/unused"
+    9  = "Reserved/unused"
+    10 = "Windows Server 2025"
+}
+
+function Convert-FunctionalLevel {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Level
+    )
+    if ($script:FunctionalLevelMap.ContainsKey($Level)) {
+        return $script:FunctionalLevelMap[$Level]
+    }
+    return "Unknown (raw value $Level)"
+}
+
+function Get-RecycleBinState {
+    <#
+        The AD Recycle Bin optional feature carries no simple on/off
+        attribute of its own; its enablement is recorded as a backlink
+        (msDS-EnabledFeatureBL) populated once the feature is scoped to the
+        forest/domain. msDS-OptionalFeatureFlags is read as a secondary
+        signal when the backlink itself is not present.
+    #>
+    $stateResult = [PSCustomObject]@{ Enabled = $false; Detail = "Unable to determine" }
+
+    $featurePath = "CN=Recycle Bin Feature,CN=Optional Features,CN=Directory Service,CN=Windows NT,CN=Services," + $script:ConfigurationNamingContext
+
+    if (-not [System.DirectoryServices.DirectoryEntry]::Exists("LDAP://$featurePath")) {
+        $stateResult.Detail = "Unable to determine"
+        return $stateResult
+    }
+
+    $featureEntry = [ADSI]("LDAP://" + $featurePath)
+    $featureEntry.RefreshCache(@("msDS-EnabledFeatureBL", "msDS-OptionalFeatureFlags"))
+    $props = $featureEntry.Properties
+
+    if ($props.Contains("msDS-EnabledFeatureBL") -and $props["msDS-EnabledFeatureBL"].Count -gt 0) {
+        $stateResult.Enabled = $true
+        $stateResult.Detail  = "Enabled (msDS-EnabledFeatureBL populated)"
+    } elseif ($props.Contains("msDS-OptionalFeatureFlags") -and $props["msDS-OptionalFeatureFlags"].Count -gt 0) {
+        $stateResult.Enabled = $true
+        $stateResult.Detail  = "Enabled (msDS-OptionalFeatureFlags populated)"
+    } else {
+        $stateResult.Enabled = $false
+        $stateResult.Detail  = "Not enabled"
+    }
+
+    return $stateResult
+}
+
+function Get-LastBackupDate {
+    <#
+        A backup/restore is one of the few operations that bumps the
+        replication version of the special "dSASignature" pseudo-attribute
+        on a naming context head; msDS-ReplAttributeMetaData exposes that as
+        an XML blob per attribute when explicitly requested. Checking all
+        three naming contexts (Domain, Configuration, Schema) and keeping the
+        most recent value gives a reasonable last-backup estimate without
+        contacting every DC individually.
+    #>
+    $changeTimes = New-Object 'System.Collections.Generic.List[DateTime]'
+
+    $namingContexts = @()
+    if ($script:BaseDN)                     { $namingContexts += $script:BaseDN }
+    if ($script:ConfigurationNamingContext) { $namingContexts += $script:ConfigurationNamingContext }
+    if ($script:SchemaNamingContext)        { $namingContexts += $script:SchemaNamingContext }
+
+    foreach ($ncDn in $namingContexts) {
+        try {
+            $ncEntry = [ADSI]("LDAP://" + $ncDn)
+            $ncEntry.RefreshCache(@("msDS-ReplAttributeMetaData"))
+            $metaValues = $ncEntry.Properties["msDS-ReplAttributeMetaData"]
+
+            if ($metaValues) {
+                foreach ($metaXml in $metaValues) {
+                    $metaText = [string]$metaXml
+                    if ($metaText -notmatch "<pszAttributeName>dSASignature</pszAttributeName>") { continue }
+                    if ($metaText -notmatch "<ftimeLastOriginatingChange>([^<]+)</ftimeLastOriginatingChange>") { continue }
+
+                    try {
+                        $parsedTime = [DateTime]::Parse(
+                            $Matches[1],
+                            [System.Globalization.CultureInfo]::InvariantCulture,
+                            [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+                        )
+                        $changeTimes.Add($parsedTime)
+                    } catch {
+                        # Unparseable timestamp for this NC; the other naming contexts are still tried.
+                    }
+                }
+            }
+        } catch {
+            # This naming context's replication metadata is unavailable; move on to the next one.
+        }
+    }
+
+    if ($changeTimes.Count -gt 0) {
+        $mostRecent = ($changeTimes | Sort-Object -Descending)[0]
+        return [PSCustomObject]@{
+            Display = $mostRecent.ToString("dd/MM/yyyy HH:mm")
+            Iso     = $mostRecent.ToString("o")
+        }
+    }
+
+    return [PSCustomObject]@{ Display = "No backup detected"; Iso = "" }
+}
+
+$script:RecycleBinState = "Unable to determine"
+try {
+    $recycleBinInfo = Get-RecycleBinState
+    $script:RecycleBinState = $recycleBinInfo.Detail
+} catch {
+    $script:RecycleBinState = "Unable to determine"
+    Write-Log -Message "Recycle Bin state lookup failed: $($_.Exception.Message)" -Level WARN
+}
+
+$script:LastBackupDisplay = "No backup detected"
+$script:LastBackupIso     = ""
+try {
+    $lastBackupInfo = Get-LastBackupDate
+    $script:LastBackupDisplay = $lastBackupInfo.Display
+    $script:LastBackupIso     = $lastBackupInfo.Iso
+} catch {
+    $script:LastBackupDisplay = "No backup detected"
+    $script:LastBackupIso     = ""
+    Write-Log -Message "Last backup lookup failed: $($_.Exception.Message)" -Level WARN
+}
+
+$script:DomainFunctionalLevelRaw  = $null
+$script:DomainFunctionalLevelName = "Unable to determine"
+try {
+    $domainEntryForLevel = [ADSI]("LDAP://" + $script:BaseDN)
+    $script:DomainFunctionalLevelRaw  = [int]$domainEntryForLevel.Properties["msDS-Behavior-Version"][0]
+    $script:DomainFunctionalLevelName = Convert-FunctionalLevel -Level $script:DomainFunctionalLevelRaw
+} catch {
+    $script:DomainFunctionalLevelName = "Unable to determine"
+    Write-Log -Message "Domain functional level lookup failed: $($_.Exception.Message)" -Level WARN
+}
+
+$script:ForestFunctionalLevelRaw  = $null
+$script:ForestFunctionalLevelName = "Unable to determine"
+try {
+    $partitionsEntry = [ADSI]("LDAP://CN=Partitions," + $script:ConfigurationNamingContext)
+    $script:ForestFunctionalLevelRaw  = [int]$partitionsEntry.Properties["msDS-Behavior-Version"][0]
+    $script:ForestFunctionalLevelName = Convert-FunctionalLevel -Level $script:ForestFunctionalLevelRaw
+} catch {
+    $script:ForestFunctionalLevelName = "Unable to determine"
+    Write-Log -Message "Forest functional level lookup failed: $($_.Exception.Message)" -Level WARN
+}
+
+$script:MachineAccountQuota = "Unable to retrieve"
+try {
+    $domainEntryForQuota = [ADSI]("LDAP://" + $script:BaseDN)
+    $script:MachineAccountQuota = [string]$domainEntryForQuota.Properties["ms-DS-MachineAccountQuota"][0]
+} catch {
+    $script:MachineAccountQuota = "Unable to retrieve"
+    Write-Log -Message "ms-DS-MachineAccountQuota lookup failed: $($_.Exception.Message)" -Level WARN
+}
+
+$script:TombstoneLifetimeDays = "Unable to retrieve"
+try {
+    $dsServiceEntry = [ADSI]("LDAP://CN=Directory Service,CN=Windows NT,CN=Services," + $script:ConfigurationNamingContext)
+    $script:TombstoneLifetimeDays = [string]$dsServiceEntry.Properties["tombstoneLifetime"][0]
+} catch {
+    $script:TombstoneLifetimeDays = "Unable to retrieve"
+    Write-Log -Message "tombstoneLifetime lookup failed: $($_.Exception.Message)" -Level WARN
+}
+
+Write-Log -Message "Domain configuration facts collected." -Level OK
+
+################################################################################
+#                       SECTION 6 - DOMAIN COMPUTER ACCOUNTS                 #
+################################################################################
+
+Show-StepProgress -Status "Section 6: Enumerating domain computer accounts"
+Write-Log -Message "Section 6: enumerating domain computer accounts" -Level INFO
+
+$script:Computers = New-Object System.Collections.ArrayList
+
+try {
+    $computerSearchRoot = [ADSI]("LDAP://" + $script:BaseDN)
+    $computerSearcher = New-Object System.DirectoryServices.DirectorySearcher($computerSearchRoot)
+    try {
+        $computerSearcher.Filter   = "(objectCategory=computer)"
+        $computerSearcher.PageSize = 1000
+        [void]$computerSearcher.PropertiesToLoad.AddRange(@(
+            "cn", "operatingsystem", "operatingsystemversion", "distinguishedname",
+            "useraccountcontrol", "lastlogontimestamp",
+            "ms-mcs-admpwdexpirationtime", "mslaps-passwordexpirationtime"
+        ))
+
+        $computerResults = $computerSearcher.FindAll()
+        try {
+            foreach ($computerResult in $computerResults) {
+                $props = $computerResult.Properties
+
+                $uac = 0
+                try {
+                    if ($props.Contains("useraccountcontrol") -and $props["useraccountcontrol"].Count -gt 0) {
+                        $uac = [Int64]$props["useraccountcontrol"][0]
+                    }
+                } catch {
+                    $uac = 0
+                }
+
+                $lastLogonInfo = Get-AdDate -Entry $props -Name "lastlogontimestamp" -FileTime
+
+                # Two LAPS attribute generations: ms-Mcs-AdmPwdExpirationTime
+                # (legacy LAPS) and msLAPS-PasswordExpirationTime (Windows
+                # LAPS). LapsExpiryIso is populated from whichever is set.
+                $legacyLapsExpiry  = Get-AdDate -Entry $props -Name "ms-mcs-admpwdexpirationtime" -FileTime
+                $windowsLapsExpiry = Get-AdDate -Entry $props -Name "mslaps-passwordexpirationtime" -FileTime
+
+                $lapsExpiryIso = ""
+                if ($legacyLapsExpiry.Iso) { $lapsExpiryIso = $legacyLapsExpiry.Iso }
+                elseif ($windowsLapsExpiry.Iso) { $lapsExpiryIso = $windowsLapsExpiry.Iso }
+
+                $computerObject = [PSCustomObject]@{
+                    Cn                         = Get-AdProp -Entry $props -Name "cn" -Default "N/A"
+                    OperatingSystem            = Get-AdProp -Entry $props -Name "operatingsystem" -Default "N/A"
+                    OperatingSystemVersion     = Get-AdProp -Entry $props -Name "operatingsystemversion" -Default "N/A"
+                    DistinguishedName          = Get-AdProp -Entry $props -Name "distinguishedname" -Default "N/A"
+                    UserAccountControl         = $uac
+                    Enabled                    = -not [bool]($uac -band 0x2)
+                    IsDomainController         = [bool]($uac -band 0x2000)
+                    TrustedForDelegation       = [bool]($uac -band 0x80000)
+                    TrustedToAuthForDelegation = [bool]($uac -band 0x1000000)
+                    LastLogonTimestampDisplay  = $lastLogonInfo.Display
+                    LastLogonTimestampIso      = $lastLogonInfo.Iso
+                    LapsLegacyExpirationIso    = $legacyLapsExpiry.Iso
+                    LapsWindowsExpirationIso   = $windowsLapsExpiry.Iso
+                    LapsExpiryIso              = $lapsExpiryIso
+                }
+
+                [void]$script:Computers.Add($computerObject)
+            }
+        } finally {
+            $computerResults.Dispose()
+        }
+    } finally {
+        $computerSearcher.Dispose()
+    }
+
+    Write-Log -Message "Section 6: $($script:Computers.Count) domain computer accounts enumerated" -Level OK
+} catch {
+    Write-Log -Message "Section 6 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                          SECTION 7 - GROUP POLICY OBJECTS                  #
+################################################################################
+
+Show-StepProgress -Status "Section 7: Enumerating Group Policy Objects"
+Write-Log -Message "Section 7: enumerating Group Policy Objects" -Level INFO
+
+$script:Gpos = New-Object System.Collections.ArrayList
+
+try {
+    $gpoContainerPath = "CN=Policies,CN=System," + $script:BaseDN
+    $gpoSearchRoot = [ADSI]("LDAP://" + $gpoContainerPath)
+    $gpoSearcher = New-Object System.DirectoryServices.DirectorySearcher($gpoSearchRoot)
+    try {
+        $gpoSearcher.Filter   = "(objectClass=groupPolicyContainer)"
+        $gpoSearcher.PageSize = 1000
+        [void]$gpoSearcher.PropertiesToLoad.AddRange(@(
+            "displayname", "whencreated", "whenchanged", "versionnumber",
+            "gpcfilesyspath", "distinguishedname", "name", "flags"
+        ))
+
+        $gpoResults = $gpoSearcher.FindAll()
+        try {
+            foreach ($gpoResult in $gpoResults) {
+                $props = $gpoResult.Properties
+
+                $whenCreatedInfo = Get-AdDate -Entry $props -Name "whencreated"
+                $whenChangedInfo = Get-AdDate -Entry $props -Name "whenchanged"
+
+                $gpoObject = [PSCustomObject]@{
+                    DisplayName       = Get-AdProp -Entry $props -Name "displayname" -Default "N/A"
+                    WhenCreatedDisplay = $whenCreatedInfo.Display
+                    WhenCreatedIso    = $whenCreatedInfo.Iso
+                    WhenChangedDisplay = $whenChangedInfo.Display
+                    WhenChangedIso    = $whenChangedInfo.Iso
+                    VersionNumber     = Get-AdProp -Entry $props -Name "versionnumber" -Default "N/A"
+                    GPCFileSysPath    = Get-AdProp -Entry $props -Name "gpcfilesyspath" -Default "N/A"
+                    DistinguishedName = Get-AdProp -Entry $props -Name "distinguishedname" -Default "N/A"
+                    Name              = Get-AdProp -Entry $props -Name "name" -Default "N/A"
+                    Flags             = Get-AdProp -Entry $props -Name "flags" -Default "N/A"
+                }
+
+                [void]$script:Gpos.Add($gpoObject)
+            }
+        } finally {
+            $gpoResults.Dispose()
+        }
+    } finally {
+        $gpoSearcher.Dispose()
+    }
+
+    Write-Log -Message "Section 7: $($script:Gpos.Count) Group Policy Objects enumerated" -Level OK
+} catch {
+    Write-Log -Message "Section 7 failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#              SECTION 8 - USER RIGHTS ASSIGNMENT (GptTmpl.inf)              #
+################################################################################
+
+Show-StepProgress -Status "Section 8: Extracting User Rights Assignment from GPOs"
+Write-Log -Message "Section 8: extracting Privilege Rights from each GPO's GptTmpl.inf" -Level INFO
+
+# Fixed privilege -> category table. Category here is a factual
+# classification of what a Windows privilege constant IS (a logon right, a
+# deny right, ...), never a judgement of whether its current assignment is
+# appropriate.
+$script:CriticalPrivileges = @(
+    "SeDebugPrivilege", "SeTcbPrivilege", "SeImpersonatePrivilege",
+    "SeAssignPrimaryTokenPrivilege", "SeLoadDriverPrivilege",
+    "SeBackupPrivilege", "SeRestorePrivilege", "SeTakeOwnershipPrivilege",
+    "SeSecurityPrivilege", "SeAuditPrivilege"
+)
+$script:HighLogonRights = @(
+    "SeInteractiveLogonRight", "SeRemoteInteractiveLogonRight",
+    "SeNetworkLogonRight", "SeBatchLogonRight", "SeServiceLogonRight"
+)
+$script:DenyLogonRights = @(
+    "SeDenyBatchLogonRight", "SeDenyInteractiveLogonRight",
+    "SeDenyRemoteInteractiveLogonRight", "SeDenyServiceLogonRight",
+    "SeDenyNetworkLogonRight"
+)
+$script:MediumPrivileges = @(
+    "SeSystemtimePrivilege", "SeCreatePagefilePrivilege", "SeCreateGlobalPrivilege",
+    "SeCreatePermanentPrivilege", "SeCreateSymbolicLinkPrivilege", "SeCreateTokenPrivilege",
+    "SeEnableDelegationPrivilege", "SeIncreaseBasePriorityPrivilege", "SeIncreaseQuotaPrivilege",
+    "SeLockMemoryPrivilege", "SeManageVolumePrivilege", "SeProfileSingleProcessPrivilege",
+    "SeRelabelPrivilege", "SeRemoteShutdownPrivilege", "SeShutdownPrivilege",
+    "SeSyncAgentPrivilege", "SeSystemEnvironmentPrivilege", "SeSystemProfilePrivilege",
+    "SeMachineAccountPrivilege", "SeTrustedCredManAccessPrivilege",
+    "SeDelegateSessionUserImpersonatePrivilege"
+)
+$script:LowPrivileges = @(
+    "SeChangeNotifyPrivilege", "SeTimeZonePrivilege", "SeUndockPrivilege",
+    "SeIncreaseWorkingSetPrivilege"
+)
+
+function Get-PrivilegeCategory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Privilege
+    )
+    if ($script:CriticalPrivileges -contains $Privilege) { return "CRITICAL" }
+    if ($script:HighLogonRights    -contains $Privilege) { return "HIGH" }
+    if ($script:DenyLogonRights    -contains $Privilege) { return "DENY" }
+    if ($script:MediumPrivileges   -contains $Privilege) { return "MEDIUM" }
+    if ($script:LowPrivileges      -contains $Privilege) { return "LOW" }
+    return "OTHER"
+}
+
+function Get-PrivilegeRightsFromInf {
+    <#
+        Parses only the [Privilege Rights] section of a GptTmpl.inf: each
+        line is "SePrivilegeName = *SID1,*SID2,Name3", principals comma
+        separated and optionally prefixed with * for a raw SID.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InfPath
+    )
+
+    $rows = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -Path $InfPath)) { return $rows }
+
+    $content = Get-Content -Path $InfPath -Encoding Unicode -ErrorAction Stop
+
+    $inPrivilegeSection = $false
+    foreach ($line in $content) {
+        $trimmedLine = $line.Trim()
+
+        if ($trimmedLine -match '^\[(.+)\]$') {
+            $inPrivilegeSection = ($Matches[1].Trim() -eq "Privilege Rights")
+            continue
+        }
+        if (-not $inPrivilegeSection) { continue }
+        if ([string]::IsNullOrWhiteSpace($trimmedLine)) { continue }
+
+        $equalsIndex = $trimmedLine.IndexOf("=")
+        if ($equalsIndex -lt 0) { continue }
+
+        $privilegeName = $trimmedLine.Substring(0, $equalsIndex).Trim()
+        $principalsRaw = $trimmedLine.Substring($equalsIndex + 1).Trim()
+
+        $principalTokens = @()
+        if ($principalsRaw) {
+            $principalTokens = @($principalsRaw -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+        }
+
+        [void]$rows.Add([PSCustomObject]@{
+            Privilege  = $privilegeName
+            Principals = $principalTokens
+        })
+    }
+
+    return $rows
+}
+
+$script:UserRightsAssignments = New-Object System.Collections.ArrayList
+
+try {
+    foreach ($gpo in $script:Gpos) {
+        if (-not $gpo.GPCFileSysPath -or $gpo.GPCFileSysPath -eq "N/A") { continue }
+
+        # GPO "flags": bit 0x2 = User Configuration disabled is NOT what we
+        # need here; bit layout is 0=both enabled,1=user disabled,
+        # 2=computer disabled,3=both disabled, so computer settings are
+        # active whenever bit 0x2 is clear.
+        $computerConfigActive = $true
+        try {
+            $flagsValue = [int]$gpo.Flags
+            $computerConfigActive = (-not [bool]($flagsValue -band 0x2))
+        } catch {
+            $computerConfigActive = $true
+        }
+        if (-not $computerConfigActive) { continue }
+
+        $infPath = Join-Path -Path $gpo.GPCFileSysPath -ChildPath "Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf"
+
+        try {
+            if (-not (Test-Path -Path $infPath)) { continue }
+
+            $privilegeRows = Get-PrivilegeRightsFromInf -InfPath $infPath
+
+            foreach ($row in $privilegeRows) {
+                $category = Get-PrivilegeCategory -Privilege $row.Privilege
+
+                [void]$script:UserRightsAssignments.Add([PSCustomObject]@{
+                    GPOName    = $gpo.DisplayName
+                    GPODn      = $gpo.DistinguishedName
+                    Privilege  = $row.Privilege
+                    Category   = $category
+                    Principals = $row.Principals
+                    InfPath    = $infPath
+                })
+            }
+        } catch {
+            Write-Log -Message "Section 8: failed to read GptTmpl.inf for GPO '$($gpo.DisplayName)': $($_.Exception.Message)" -Level WARN
+        }
+    }
+
+    Write-Log -Message "Section 8: $($script:UserRightsAssignments.Count) privilege/principal rows extracted from $($script:Gpos.Count) GPOs" -Level OK
+} catch {
+    Write-Log -Message "Section 8 failed: $($_.Exception.Message)" -Level ERROR
+}
