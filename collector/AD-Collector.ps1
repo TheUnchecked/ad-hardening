@@ -62,10 +62,10 @@ $script:RemoteStaleDays         = 90
 #                          PROGRESS BAR & LOGGING                            #
 ################################################################################
 
-# currentStep/totalSteps back Show-StepProgress; totalSteps is a placeholder
-# until the real number of Show-StepProgress calls is counted at the end of
-# the script and hard-coded here.
-$script:totalSteps  = 1
+# currentStep/totalSteps back Show-StepProgress. totalSteps matches the
+# actual number of Show-StepProgress calls in this script (26, counted at
+# the end of writing it); update this if a call is added or removed.
+$script:totalSteps  = 26
 $script:currentStep = 0
 $script:Stopwatch   = [System.Diagnostics.Stopwatch]::StartNew()
 $script:LogFilePath = $null
@@ -2981,3 +2981,453 @@ if (-not $script:RemoteCollectionEnabled) {
         Write-Log -Message "Remote collection complete: $($script:ServersReached) reached, $($script:ServersFailed) failed, out of $($script:ServersTargeted) targeted" -Level OK
     }
 }
+
+################################################################################
+#                          OUTPUT ASSEMBLY (JSON + HTML)                     #
+################################################################################
+
+function New-CollectorSection {
+    <#
+        Every key in the final output's "data" object passes through here,
+        so each one carries the same { meta: { type, count }, data: [...] }
+        shape regardless of what it holds.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Type,
+
+        [AllowNull()]
+        $Items
+    )
+
+    $itemsArray = @($Items)
+
+    return [PSCustomObject]@{
+        meta = [PSCustomObject]@{
+            type  = $Type
+            count = $itemsArray.Count
+        }
+        data = $itemsArray
+    }
+}
+
+Show-StepProgress -Status "Assembling the final collection object"
+Write-Log -Message "Assembling the final collection object" -Level INFO
+
+$script:MonitoredGroupsOutput = New-Object System.Collections.ArrayList
+foreach ($groupCn in $script:MonitoredGroupsFound.Keys) {
+    [void]$script:MonitoredGroupsOutput.Add([PSCustomObject]@{
+        Name              = $groupCn
+        DistinguishedName = $script:MonitoredGroupsFound[$groupCn]
+        MemberCount       = $script:MonitoredGroupsCounters[$groupCn]
+    })
+}
+
+$script:GeneratedUtc = [DateTime]::UtcNow
+
+$script:MetaWarnings = New-Object System.Collections.ArrayList
+if (-not [string]::IsNullOrEmpty($script:RsatWarning)) { [void]$script:MetaWarnings.Add($script:RsatWarning) }
+if ($script:RsatAvailable -and -not $script:TierGpoCoverage.TierGpo) {
+    [void]$script:MetaWarnings.Add("No single GPO configures all five deny-logon rights together; verify whether the same principal is instead configured across multiple GPOs for these five rights.")
+}
+
+$script:FinalCollection = [PSCustomObject]@{
+    meta = [PSCustomObject]@{
+        tool                  = "ADCollector"
+        type                  = "adcollector_collection"
+        version               = "1.0.0"
+        generatedUtc          = $script:GeneratedUtc.ToString("o")
+        baseDN                = $script:BaseDN
+        domainSid             = $script:CurrentDomainSid
+        domainFunctionalLevel = $script:DomainFunctionalLevelName
+        forestFunctionalLevel = $script:ForestFunctionalLevelName
+        machineAccountQuota   = $script:MachineAccountQuota
+        tombstoneLifetimeDays = $script:TombstoneLifetimeDays
+        recycleBinState       = $script:RecycleBinState
+        lastBackupDisplay     = $script:LastBackupDisplay
+        lastBackupIso         = $script:LastBackupIso
+        powerShellVersion     = $PSVersionTable.PSVersion.ToString()
+        scriptSha256          = $script:ScriptSha256
+        serversTargeted       = $script:ServersTargeted
+        serversReached        = $script:ServersReached
+        serversFailed         = $script:ServersFailed
+        warnings              = @($script:MetaWarnings)
+    }
+    data = [PSCustomObject]@{
+        monitoredGroups              = New-CollectorSection -Type "monitoredGroups" -Items $script:MonitoredGroupsOutput
+        unifiedPrivilegedUsers       = New-CollectorSection -Type "unifiedPrivilegedUsers" -Items @($script:UnifiedPrivilegedUsers)
+        rootPrivilegedAces           = New-CollectorSection -Type "rootPrivilegedAces" -Items @($script:RootPrivilegedAces)
+        rootDelegationPrincipals     = New-CollectorSection -Type "rootDelegationPrincipals" -Items @($script:RootDelegationPrincipals.Values)
+        dcOuPrivilegedAces           = New-CollectorSection -Type "dcOuPrivilegedAces" -Items @($script:DcOuPrivilegedAces)
+        dcDelegationPrincipals       = New-CollectorSection -Type "dcDelegationPrincipals" -Items @($script:DcOuDelegationPrincipals.Values)
+        exchangePrivilegedAces       = New-CollectorSection -Type "exchangePrivilegedAces" -Items @($script:ExchangePrivilegedAces)
+        exchangeDelegationPrincipals = New-CollectorSection -Type "exchangeDelegationPrincipals" -Items @($script:ExchangeDelegationPrincipals.Values)
+        computers                    = New-CollectorSection -Type "computers" -Items @($script:Computers)
+        gpos                         = New-CollectorSection -Type "gpos" -Items @($script:Gpos)
+        userRightsAssignments        = New-CollectorSection -Type "userRightsAssignments" -Items @($script:UserRightsAssignments)
+        tierGpoCoverage              = New-CollectorSection -Type "tierGpoCoverage" -Items @($script:TierGpoCoverage)
+        kerberoastable               = New-CollectorSection -Type "kerberoastable" -Items @($script:Kerberoastable)
+        asrepRoastable               = New-CollectorSection -Type "asrepRoastable" -Items @($script:AsrepRoastable)
+        msolAccounts                 = New-CollectorSection -Type "msolAccounts" -Items @($script:MsolAccounts)
+        krbtgt                       = New-CollectorSection -Type "krbtgt" -Items @($script:Krbtgt)
+        guestAccount                 = New-CollectorSection -Type "guestAccount" -Items @($script:GuestAccount)
+        laps                         = New-CollectorSection -Type "laps" -Items @($script:Laps)
+        remoteOsInfo                 = New-CollectorSection -Type "remoteOsInfo" -Items @($script:RemoteOsInfo)
+        remoteScheduledTasks         = New-CollectorSection -Type "remoteScheduledTasks" -Items @($script:RemoteScheduledTasks)
+        remoteLocalAccounts          = New-CollectorSection -Type "remoteLocalAccounts" -Items @($script:RemoteLocalAccounts)
+        remoteServices               = New-CollectorSection -Type "remoteServices" -Items @($script:RemoteServices)
+        collectionErrors             = New-CollectorSection -Type "collectionErrors" -Items @($script:CollectionErrors)
+    }
+}
+
+Write-Log -Message "Final collection object assembled" -Level OK
+
+################################################################################
+#                              JSON EXPORT                                   #
+################################################################################
+
+Show-StepProgress -Status "Writing adcollector_collection.json"
+Write-Log -Message "Serializing the collection object to JSON" -Level INFO
+
+$script:JsonOutputPath = Join-Path -Path $script:RunFolderPath -ChildPath "adcollector_collection.json"
+$script:CollectionJsonText = $null
+
+try {
+    # Depth 15: scheduled-task triggers/actions nest several levels deep
+    # inside remoteScheduledTasks (section wrapper -> data array -> task ->
+    # Triggers array -> trigger object), so the default of 2 and even a
+    # depth of 8 are not enough to serialize them in full.
+    $script:CollectionJsonText = $script:FinalCollection | ConvertTo-Json -Depth 15
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($script:JsonOutputPath, $script:CollectionJsonText, $utf8NoBom)
+
+    Write-Log -Message "JSON written to $($script:JsonOutputPath)" -Level OK
+} catch {
+    Write-Log -Message "JSON serialization/write failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                              HTML REPORT EXPORT                            #
+################################################################################
+
+Show-StepProgress -Status "Writing adcollector_report.html"
+Write-Log -Message "Generating the self-contained HTML report from the in-memory collection object" -Level INFO
+
+function ConvertTo-HtmlEncoded {
+    <#
+        A minimal, dependency-free HTML encoder (no System.Web assembly
+        load, which is not guaranteed present on a bare Server Core host).
+    #>
+    param(
+        [AllowNull()]
+        [string]$Text
+    )
+    if ($null -eq $Text) { return "" }
+    $encoded = $Text
+    $encoded = $encoded.Replace("&", "&amp;")
+    $encoded = $encoded.Replace("<", "&lt;")
+    $encoded = $encoded.Replace(">", "&gt;")
+    $encoded = $encoded.Replace('"', "&quot;")
+    $encoded = $encoded.Replace("'", "&#39;")
+    return $encoded
+}
+
+# Single-quoted here-string: the template is taken verbatim, so PowerShell
+# never tries to interpolate the JavaScript's own $-prefixed syntax. Content
+# is spliced in afterward via plain, literal .Replace() token substitution.
+$script:HtmlTemplate = @'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>__TITLE__</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: "Segoe UI", Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; color:#1a1a1a; }
+  header { background:#14213d; color:#fff; padding:16px 24px; }
+  header h1 { margin:0 0 10px 0; font-size:20px; }
+  .meta-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:6px 16px; font-size:13px; }
+  .meta-grid div span.label { color:#9aa5c4; display:block; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .warnings { background:#5c3a00; color:#ffe9b3; padding:10px 24px; font-size:13px; }
+  .warnings ul { margin:4px 0 0 18px; padding:0; }
+  nav#tab-nav { display:flex; flex-wrap:wrap; background:#1f2a48; padding:0 12px; position:sticky; top:0; z-index:10; }
+  nav#tab-nav button { background:transparent; border:none; color:#c9d2e8; padding:10px 14px; cursor:pointer; font-size:13px; }
+  nav#tab-nav button.active { background:#f4f6f8; color:#14213d; font-weight:bold; }
+  main { padding:16px 24px; }
+  .section { display:none; background:#fff; border:1px solid #d8dee6; border-radius:6px; padding:12px; margin-bottom:20px; }
+  .section h2 { margin-top:0; font-size:16px; }
+  .search-box { width:100%; max-width:360px; padding:6px 8px; margin-bottom:10px; border:1px solid #c3cad6; border-radius:4px; font-size:13px; box-sizing:border-box; }
+  .table-scroll { overflow:auto; max-height:70vh; }
+  table { border-collapse: collapse; width:100%; font-size:12px; }
+  th, td { border:1px solid #e2e6ec; padding:5px 8px; text-align:left; vertical-align:top; word-break:break-word; }
+  th { background:#eef1f6; cursor:pointer; position:sticky; top:0; user-select:none; }
+  th:hover { background:#e2e7f0; }
+  tr:nth-child(even) td { background:#fafbfc; }
+  footer { padding:16px 24px; font-size:11px; color:#8a93a3; }
+  @media (prefers-color-scheme: dark) {
+    body { background:#0f1420; color:#dfe4ee; }
+    .section { background:#161d2e; border-color:#2a3450; }
+    th { background:#1f2942; }
+    tr:nth-child(even) td { background:#131a29; }
+    td, th { border-color:#28324c; }
+    .search-box { background:#0f1420; color:#dfe4ee; border-color:#2a3450; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>__TITLE__</h1>
+  <div class="meta-grid">
+__META_ITEMS__
+  </div>
+</header>
+__WARNINGS_BLOCK__
+<nav id="tab-nav"></nav>
+<main id="sections-root"></main>
+<footer>Generated offline by ADCollector. No external resources are loaded by this page.</footer>
+<script id="collection-data" type="application/json">__DATA_JSON__</script>
+<script>
+(function () {
+  "use strict";
+  var raw = document.getElementById("collection-data").textContent;
+  var collection = JSON.parse(raw);
+  var sectionsRoot = document.getElementById("sections-root");
+  var tabNav = document.getElementById("tab-nav");
+  var sortState = {};
+
+  function renderValue(val) {
+    if (val === null || val === undefined) { return ""; }
+    if (typeof val === "object") { return JSON.stringify(val); }
+    return String(val);
+  }
+
+  function sortTable(table, colIndex) {
+    var tbody = table.querySelector("tbody");
+    var rows = Array.prototype.slice.call(tbody.rows);
+    var stateKey = table.id + "-" + colIndex;
+    var ascending = !sortState[stateKey];
+    sortState = {};
+    sortState[stateKey] = ascending;
+
+    rows.sort(function (a, b) {
+      var av = a.cells[colIndex] ? a.cells[colIndex].textContent : "";
+      var bv = b.cells[colIndex] ? b.cells[colIndex].textContent : "";
+      var an = parseFloat(av);
+      var bn = parseFloat(bv);
+      var cmp;
+      if (!isNaN(an) && !isNaN(bn) && av.trim() !== "" && bv.trim() !== "") {
+        cmp = an - bn;
+      } else {
+        cmp = av.localeCompare(bv);
+      }
+      return ascending ? cmp : -cmp;
+    });
+
+    rows.forEach(function (row) { tbody.appendChild(row); });
+  }
+
+  function buildSection(sectionKey, sectionObj, index) {
+    var wrapper = document.createElement("div");
+    wrapper.className = "section";
+    wrapper.id = "section-" + sectionKey;
+    if (index === 0) { wrapper.style.display = "block"; }
+
+    var heading = document.createElement("h2");
+    heading.textContent = sectionKey + " (" + sectionObj.meta.count + ")";
+    wrapper.appendChild(heading);
+
+    var searchBox = document.createElement("input");
+    searchBox.type = "text";
+    searchBox.className = "search-box";
+    searchBox.placeholder = "Filter " + sectionKey + "...";
+    wrapper.appendChild(searchBox);
+
+    var scrollWrap = document.createElement("div");
+    scrollWrap.className = "table-scroll";
+
+    var table = document.createElement("table");
+    table.id = "table-" + sectionKey;
+    var thead = document.createElement("thead");
+    var tbody = document.createElement("tbody");
+
+    var items = sectionObj.data || [];
+    var columns = [];
+    if (items.length > 0 && typeof items[0] === "object" && items[0] !== null) {
+      for (var key in items[0]) {
+        if (Object.prototype.hasOwnProperty.call(items[0], key)) { columns.push(key); }
+      }
+    }
+
+    var headerRow = document.createElement("tr");
+    columns.forEach(function (col, colIndex) {
+      var th = document.createElement("th");
+      th.textContent = col;
+      th.addEventListener("click", function () { sortTable(table, colIndex); });
+      headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    items.forEach(function (item) {
+      var tr = document.createElement("tr");
+      columns.forEach(function (col) {
+        var td = document.createElement("td");
+        td.textContent = renderValue(item[col]);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    scrollWrap.appendChild(table);
+    wrapper.appendChild(scrollWrap);
+
+    searchBox.addEventListener("input", function () {
+      var filterText = searchBox.value.toLowerCase();
+      Array.prototype.forEach.call(tbody.rows, function (row) {
+        var rowText = row.textContent.toLowerCase();
+        row.style.display = rowText.indexOf(filterText) === -1 ? "none" : "";
+      });
+    });
+
+    sectionsRoot.appendChild(wrapper);
+  }
+
+  function showSection(key, button) {
+    Array.prototype.forEach.call(document.querySelectorAll(".section"), function (el) { el.style.display = "none"; });
+    Array.prototype.forEach.call(document.querySelectorAll(".tab-button"), function (el) { el.classList.remove("active"); });
+    var target = document.getElementById("section-" + key);
+    if (target) { target.style.display = "block"; }
+    if (button) { button.classList.add("active"); }
+  }
+
+  var sectionKeys = [];
+  for (var sectionKey in collection.data) {
+    if (Object.prototype.hasOwnProperty.call(collection.data, sectionKey)) { sectionKeys.push(sectionKey); }
+  }
+
+  sectionKeys.forEach(function (sectionKey, index) {
+    buildSection(sectionKey, collection.data[sectionKey], index);
+
+    var btn = document.createElement("button");
+    btn.className = "tab-button" + (index === 0 ? " active" : "");
+    btn.textContent = sectionKey;
+    btn.addEventListener("click", function () { showSection(sectionKey, btn); });
+    tabNav.appendChild(btn);
+  });
+})();
+</script>
+</body>
+</html>
+'@
+
+try {
+    $reportMeta  = $script:FinalCollection.meta
+    $reportTitle = "ADCollector Report - $($reportMeta.baseDN)"
+
+    $metaPairs = [ordered]@{
+        "Domain (Base DN)"                = $reportMeta.baseDN
+        "Domain SID"                      = $reportMeta.domainSid
+        "Domain functional level"         = $reportMeta.domainFunctionalLevel
+        "Forest functional level"         = $reportMeta.forestFunctionalLevel
+        "Generated (UTC)"                 = $reportMeta.generatedUtc
+        "Tool version"                    = $reportMeta.version
+        "PowerShell version"              = $reportMeta.powerShellVersion
+        "Collector SHA-256"               = $reportMeta.scriptSha256
+        "Recycle Bin"                     = $reportMeta.recycleBinState
+        "Last backup"                     = $reportMeta.lastBackupDisplay
+        "Machine account quota"           = $reportMeta.machineAccountQuota
+        "Tombstone lifetime (days)"       = $reportMeta.tombstoneLifetimeDays
+        "Servers targeted/reached/failed" = "$($reportMeta.serversTargeted) / $($reportMeta.serversReached) / $($reportMeta.serversFailed)"
+    }
+
+    $metaItemsHtml = ""
+    foreach ($pairKey in $metaPairs.Keys) {
+        $encodedLabel = ConvertTo-HtmlEncoded -Text $pairKey
+        $encodedValue = ConvertTo-HtmlEncoded -Text ([string]$metaPairs[$pairKey])
+        $metaItemsHtml += "    <div><span class=""label"">$encodedLabel</span>$encodedValue</div>`n"
+    }
+
+    $warningsBlockHtml = ""
+    if ($reportMeta.warnings -and $reportMeta.warnings.Count -gt 0) {
+        $warningItemsHtml = ""
+        foreach ($warningText in $reportMeta.warnings) {
+            $warningItemsHtml += "<li>$(ConvertTo-HtmlEncoded -Text $warningText)</li>"
+        }
+        $warningsBlockHtml = "<div class=""warnings""><strong>Warnings</strong><ul>$warningItemsHtml</ul></div>"
+    }
+
+    # Neutralize any literal "</" a collected field might contain (e.g. a
+    # task argument with "</script>" in it) so it can never prematurely
+    # close this tag; "\/" is a valid escaped forward slash in JSON, so this
+    # never changes what the embedded data means once parsed.
+    $dataJsonForHtml = $script:CollectionJsonText -replace '</', '<\/'
+
+    $finalHtml = $script:HtmlTemplate.Replace("__TITLE__", (ConvertTo-HtmlEncoded -Text $reportTitle))
+    $finalHtml = $finalHtml.Replace("__META_ITEMS__", $metaItemsHtml)
+    $finalHtml = $finalHtml.Replace("__WARNINGS_BLOCK__", $warningsBlockHtml)
+    $finalHtml = $finalHtml.Replace("__DATA_JSON__", $dataJsonForHtml)
+
+    $script:HtmlOutputPath = Join-Path -Path $script:RunFolderPath -ChildPath "adcollector_report.html"
+    $utf8NoBomForHtml = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($script:HtmlOutputPath, $finalHtml, $utf8NoBomForHtml)
+
+    Write-Log -Message "HTML report written to $($script:HtmlOutputPath)" -Level OK
+} catch {
+    Write-Log -Message "HTML report generation failed: $($_.Exception.Message)" -Level ERROR
+}
+
+################################################################################
+#                    CLOSING: ARCHIVE, INTEGRITY HASH, SUMMARY               #
+################################################################################
+
+Show-StepProgress -Status "Compressing the run folder"
+Write-Log -Message "Compressing the run folder to a zip archive" -Level INFO
+
+$archivePath    = "$($script:RunFolderPath).zip"
+$archiveCreated = $false
+
+try {
+    Compress-Archive -Path (Join-Path -Path $script:RunFolderPath -ChildPath "*") -DestinationPath $archivePath -Force -ErrorAction Stop
+    $archiveCreated = $true
+} catch {
+    Write-Log -Message "Compression failed; keeping the uncompressed run folder at $($script:RunFolderPath): $($_.Exception.Message)" -Level WARN
+}
+
+if ($archiveCreated) {
+    # The log file handle must be released before its own folder is removed,
+    # otherwise the open handle keeps the folder locked.
+    $script:LogFilePath = $null
+
+    try {
+        Remove-Item -Path $script:RunFolderPath -Recurse -Force -ErrorAction Stop
+    } catch {
+        Write-Host "[WARN] Failed to remove the uncompressed run folder $($script:RunFolderPath): $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+Show-StepProgress -Status "Collection complete" -Activity "ADCollector Collection"
+Write-Progress -Id 1 -Activity "ADCollector Collection" -Completed
+
+$script:Stopwatch.Stop()
+$elapsed          = $script:Stopwatch.Elapsed
+$elapsedFormatted = "{0:D2}:{1:D2}:{2:D2}" -f [Math]::Floor($elapsed.TotalHours), $elapsed.Minutes, $elapsed.Seconds
+
+$archiveSha256 = "N/A"
+if ($archiveCreated -and (Test-Path -Path $archivePath)) {
+    try { $archiveSha256 = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash } catch { $archiveSha256 = "N/A" }
+}
+
+$finalOutputPath = $script:RunFolderPath
+if ($archiveCreated) { $finalOutputPath = $archivePath }
+
+$summaryLines = @(
+    "================================================================",
+    " ADCollector collection complete",
+    "----------------------------------------------------------------",
+    " Elapsed time : $elapsedFormatted",
+    " Output       : $finalOutputPath",
+    " SHA-256      : $archiveSha256",
+    "================================================================"
+)
+foreach ($summaryLine in $summaryLines) { Write-Host $summaryLine -ForegroundColor Cyan }
