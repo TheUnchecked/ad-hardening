@@ -2532,3 +2532,452 @@ try {
 } catch {
     Write-Log -Message "Section 15 failed: $($_.Exception.Message)" -Level ERROR
 }
+
+################################################################################
+#         SECTIONS 16-19 - REMOTE COLLECTION (WMI/CIM ON MEMBER SERVERS)     #
+################################################################################
+
+$script:CollectionErrors     = New-Object System.Collections.ArrayList
+$script:RemoteOsInfo         = New-Object System.Collections.ArrayList
+$script:RemoteScheduledTasks = New-Object System.Collections.ArrayList
+$script:RemoteLocalAccounts  = New-Object System.Collections.ArrayList
+$script:RemoteServices       = New-Object System.Collections.ArrayList
+$script:ServersTargeted      = 0
+$script:ServersReached       = 0
+$script:ServersFailed        = 0
+
+# Self-contained worker: runspaces do not share the parent's script scope, so
+# every value it needs (ComputerName, TimeoutSeconds) is passed in as a
+# parameter rather than read from $script:... state.
+$script:RemoteWorkerScript = {
+    param(
+        [string]$ComputerName,
+        [int]$TimeoutSeconds
+    )
+
+    $workerErrors = New-Object System.Collections.ArrayList
+
+    function Add-CollectionError {
+        param($Section, $Protocol, $Message)
+        [void]$workerErrors.Add([PSCustomObject]@{
+            ComputerName = $ComputerName
+            Section      = $Section
+            Protocol     = $Protocol
+            Message      = $Message
+        })
+    }
+
+    $result = [PSCustomObject]@{
+        ComputerName   = $ComputerName
+        Reached        = $false
+        Protocol       = $null
+        OsInfo         = $null
+        ScheduledTasks = New-Object System.Collections.ArrayList
+        LocalAccounts  = $null
+        Services       = New-Object System.Collections.ArrayList
+        Errors         = $workerErrors
+    }
+
+    $cimSession   = $null
+    $usedProtocol = $null
+
+    try {
+        $wsmanOptions = New-CimSessionOption -Protocol Wsman
+        $cimSession   = New-CimSession -ComputerName $ComputerName -SessionOption $wsmanOptions -OperationTimeoutSec $TimeoutSeconds -ErrorAction Stop
+        $usedProtocol = "WSMan"
+    } catch {
+        Add-CollectionError -Section "Connection" -Protocol "WSMan" -Message $_.Exception.Message
+        try {
+            $dcomOptions  = New-CimSessionOption -Protocol Dcom
+            $cimSession   = New-CimSession -ComputerName $ComputerName -SessionOption $dcomOptions -OperationTimeoutSec $TimeoutSeconds -ErrorAction Stop
+            $usedProtocol = "DCOM"
+        } catch {
+            Add-CollectionError -Section "Connection" -Protocol "DCOM" -Message $_.Exception.Message
+        }
+    }
+
+    if (-not $cimSession) {
+        $result.Errors = @($workerErrors)
+        return $result
+    }
+
+    $result.Reached  = $true
+    $result.Protocol = $usedProtocol
+
+    # ---- Section 16: operating system / computer system info ----
+    try {
+        $osInstance = Get-CimInstance -CimSession $cimSession -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $csInstance = Get-CimInstance -CimSession $cimSession -ClassName Win32_ComputerSystem -ErrorAction Stop
+
+        $installIso  = $null
+        $lastBootIso = $null
+        try { if ($osInstance.InstallDate)    { $installIso  = ([DateTime]$osInstance.InstallDate).ToUniversalTime().ToString("o") } } catch { $installIso = $null }
+        try { if ($osInstance.LastBootUpTime) { $lastBootIso = ([DateTime]$osInstance.LastBootUpTime).ToUniversalTime().ToString("o") } } catch { $lastBootIso = $null }
+
+        $result.OsInfo = [PSCustomObject]@{
+            Caption                   = $osInstance.Caption
+            Version                   = $osInstance.Version
+            BuildNumber               = $osInstance.BuildNumber
+            OSArchitecture            = $osInstance.OSArchitecture
+            InstallDateIso            = $installIso
+            LastBootUpTimeIso         = $lastBootIso
+            ServicePackMajorVersion   = $osInstance.ServicePackMajorVersion
+            Domain                    = $csInstance.Domain
+            Manufacturer              = $csInstance.Manufacturer
+            Model                     = $csInstance.Model
+            TotalPhysicalMemory       = $csInstance.TotalPhysicalMemory
+            NumberOfLogicalProcessors = $csInstance.NumberOfLogicalProcessors
+            DomainRole                = $csInstance.DomainRole
+        }
+    } catch {
+        Add-CollectionError -Section "16-OsInfo" -Protocol $usedProtocol -Message $_.Exception.Message
+    }
+
+    # ---- Section 17: scheduled tasks (CIM TaskScheduler provider, not the
+    #      ScheduledTasks module, which would have to be present remotely) ----
+    try {
+        $tasks = Get-CimInstance -CimSession $cimSession -Namespace "root/Microsoft/Windows/TaskScheduler" -ClassName MSFT_ScheduledTask -ErrorAction Stop
+
+        foreach ($task in $tasks) {
+            # Built-in Microsoft scheduled tasks are excluded; only tasks an
+            # administrator or an application added are of interest here.
+            if ($task.TaskPath -like '\Microsoft\*') { continue }
+
+            $actionsList = New-Object System.Collections.ArrayList
+            foreach ($action in $task.Actions) {
+                [void]$actionsList.Add([PSCustomObject]@{
+                    Execute          = $action.Execute
+                    Arguments        = $action.Arguments
+                    WorkingDirectory = $action.WorkingDirectory
+                })
+            }
+
+            $triggersList = New-Object System.Collections.ArrayList
+            foreach ($trigger in $task.Triggers) {
+                [void]$triggersList.Add([PSCustomObject]@{
+                    Type          = $trigger.CimClass.CimClassName
+                    StartBoundary = $trigger.StartBoundary
+                    EndBoundary   = $trigger.EndBoundary
+                    Enabled       = $trigger.Enabled
+                })
+            }
+
+            $principal = $null
+            if ($task.Principal) {
+                $principal = [PSCustomObject]@{
+                    UserId    = $task.Principal.UserId
+                    RunLevel  = $task.Principal.RunLevel
+                    LogonType = $task.Principal.LogonType
+                }
+            }
+
+            $taskInfoObject = $null
+            try {
+                $taskInfoObject = $task | Get-CimAssociatedInstance -ResultClassName MSFT_TaskInfo -ErrorAction Stop
+            } catch {
+                $taskInfoObject = $null
+            }
+
+            $lastRunTimeValue    = $null
+            $lastTaskResultValue = $null
+            $nextRunTimeValue    = $null
+            if ($taskInfoObject) {
+                $lastRunTimeValue    = $taskInfoObject.LastRunTime
+                $lastTaskResultValue = $taskInfoObject.LastTaskResult
+                $nextRunTimeValue    = $taskInfoObject.NextRunTime
+            }
+
+            [void]$result.ScheduledTasks.Add([PSCustomObject]@{
+                TaskPath       = $task.TaskPath
+                TaskName       = $task.TaskName
+                State          = [string]$task.State
+                Enabled        = $task.Settings.Enabled
+                Author         = $task.Author
+                Principal      = $principal
+                Actions        = @($actionsList)
+                Triggers       = @($triggersList)
+                LastRunTime    = $lastRunTimeValue
+                LastTaskResult = $lastTaskResultValue
+                NextRunTime    = $nextRunTimeValue
+            })
+        }
+    } catch {
+        Add-CollectionError -Section "17-ScheduledTasks" -Protocol $usedProtocol -Message $_.Exception.Message
+    }
+
+    # ---- Section 18: local users and groups ----
+    try {
+        $localUsers  = Get-CimInstance -CimSession $cimSession -ClassName Win32_UserAccount -Filter "LocalAccount='True'" -ErrorAction Stop
+        $localGroups = Get-CimInstance -CimSession $cimSession -ClassName Win32_Group -Filter "LocalAccount='True'" -ErrorAction Stop
+
+        $shortComputerName = $ComputerName
+        $dotIndex = $ComputerName.IndexOf(".")
+        if ($dotIndex -ge 0) { $shortComputerName = $ComputerName.Substring(0, $dotIndex) }
+
+        $usersList = New-Object System.Collections.ArrayList
+        foreach ($localUser in $localUsers) {
+            [void]$usersList.Add([PSCustomObject]@{
+                Name               = $localUser.Name
+                SID                = $localUser.SID
+                Disabled           = $localUser.Disabled
+                Lockout            = $localUser.Lockout
+                PasswordExpires    = $localUser.PasswordExpires
+                PasswordRequired   = $localUser.PasswordRequired
+                PasswordChangeable = $localUser.PasswordChangeable
+                Description        = $localUser.Description
+            })
+        }
+
+        $groupsList = New-Object System.Collections.ArrayList
+        foreach ($localGroup in $localGroups) {
+            $membersList = New-Object System.Collections.ArrayList
+            try {
+                $groupComponent = "Win32_Group.Domain='{0}',Name='{1}'" -f $localGroup.Domain, $localGroup.Name
+                $memberQuery    = "ASSOCIATORS OF {$groupComponent} WHERE AssocClass=Win32_GroupUser"
+                $members        = Get-CimInstance -CimSession $cimSession -Query $memberQuery -ErrorAction Stop
+
+                foreach ($member in $members) {
+                    $memberSid = $null
+                    try { $memberSid = $member.SID } catch { $memberSid = $null }
+
+                    # A member's Domain differs from this computer's own
+                    # (short) name exactly when it is a domain principal
+                    # rather than a local account.
+                    $isDomainPrincipal = $false
+                    if ($member.Domain) {
+                        $isDomainPrincipal = (-not $member.Domain.Equals($shortComputerName, [StringComparison]::OrdinalIgnoreCase))
+                    }
+
+                    [void]$membersList.Add([PSCustomObject]@{
+                        Name              = $member.Name
+                        SID               = $memberSid
+                        Type              = $member.CimClass.CimClassName
+                        IsDomainPrincipal = $isDomainPrincipal
+                    })
+                }
+            } catch {
+                Add-CollectionError -Section "18-LocalGroupMembers" -Protocol $usedProtocol -Message ("Group '$($localGroup.Name)': " + $_.Exception.Message)
+            }
+
+            [void]$groupsList.Add([PSCustomObject]@{
+                Name                   = $localGroup.Name
+                SID                    = $localGroup.SID
+                Description            = $localGroup.Description
+                # Identified by the stable well-known SID suffix, never by
+                # name, which is localized and can be renamed.
+                IsLocalAdministrators  = ($localGroup.SID -eq "S-1-5-32-544")
+                Members                = @($membersList)
+            })
+        }
+
+        $result.LocalAccounts = [PSCustomObject]@{
+            Users  = @($usersList)
+            Groups = @($groupsList)
+        }
+    } catch {
+        Add-CollectionError -Section "18-LocalAccounts" -Protocol $usedProtocol -Message $_.Exception.Message
+    }
+
+    # ---- Section 19: services ----
+    try {
+        $services = Get-CimInstance -CimSession $cimSession -ClassName Win32_Service -ErrorAction Stop
+
+        foreach ($svc in $services) {
+            $pathName = $svc.PathName
+
+            # Raw fact, not a risk judgement: true when PathName is not
+            # quote-wrapped and contains at least one space.
+            $unquotedPathWithSpaces = $false
+            if ($pathName -and $pathName.Contains(" ") -and (-not $pathName.TrimStart().StartsWith('"'))) {
+                $unquotedPathWithSpaces = $true
+            }
+
+            $startName = $svc.StartName
+            $runsAsDomainAccount = $false
+            if ($startName) {
+                $isLocalSystem  = $startName -eq "LocalSystem"
+                $isNtAuthority  = $startName -like "NT AUTHORITY\*"
+                $isLocalAccount = ($startName -like "$shortComputerName\*") -or ($startName -like ".\*") -or ($startName -like "NT SERVICE\*")
+                $runsAsDomainAccount = (-not $isLocalSystem) -and (-not $isNtAuthority) -and (-not $isLocalAccount)
+            }
+
+            [void]$result.Services.Add([PSCustomObject]@{
+                Name                   = $svc.Name
+                DisplayName            = $svc.DisplayName
+                State                  = $svc.State
+                StartMode              = $svc.StartMode
+                StartName              = $startName
+                PathName               = $pathName
+                Description            = $svc.Description
+                DelayedAutoStart       = $svc.DelayedAutoStart
+                UnquotedPathWithSpaces = $unquotedPathWithSpaces
+                RunsAsDomainAccount    = $runsAsDomainAccount
+            })
+        }
+    } catch {
+        Add-CollectionError -Section "19-Services" -Protocol $usedProtocol -Message $_.Exception.Message
+    }
+
+    try { Remove-CimSession -CimSession $cimSession } catch { }
+
+    $result.Errors = @($workerErrors)
+    return $result
+}
+
+if (-not $script:RemoteCollectionEnabled) {
+    Show-StepProgress -Status "Remote collection (Sections 16-19) disabled by configuration"
+    Write-Log -Message 'Remote collection is disabled ($script:RemoteCollectionEnabled = $false); Sections 16-19 will be present but empty in the output.' -Level WARN
+} else {
+    Show-StepProgress -Status "Remote collection: selecting target servers"
+    Write-Log -Message "Selecting remote collection targets from the Section 6 computer inventory" -Level INFO
+
+    $staleThreshold = [DateTime]::UtcNow.AddDays(-$script:RemoteStaleDays)
+
+    $script:RemoteTargets = @($script:Computers | Where-Object {
+        $_.Enabled -and
+        $_.OperatingSystem -and $_.OperatingSystem -like "*Server*" -and
+        $_.LastLogonTimestampIso -and ([DateTime]$_.LastLogonTimestampIso) -ge $staleThreshold
+    })
+
+    $script:ServersTargeted = $script:RemoteTargets.Count
+    Write-Log -Message "$($script:ServersTargeted) server(s) selected for remote collection (enabled, OS contains 'Server', last logon within $($script:RemoteStaleDays) days)" -Level INFO
+
+    if ($script:ServersTargeted -eq 0) {
+        Write-Log -Message "No eligible remote targets; Sections 16-19 will be empty." -Level WARN
+    } else {
+        Show-StepProgress -Status "Remote collection: dispatching $($script:ServersTargeted) hosts across $($script:RemoteThrottleLimit) runspaces"
+        Write-Log -Message "Starting remote collection with a runspace pool (throttle=$($script:RemoteThrottleLimit), per-host CIM timeout=$($script:RemoteTimeoutSeconds)s)" -Level INFO
+
+        $runspacePool = [runspacefactory]::CreateRunspacePool(1, $script:RemoteThrottleLimit)
+        $runspacePool.Open()
+
+        $pendingJobs = New-Object System.Collections.ArrayList
+        $workerScriptText = $script:RemoteWorkerScript.ToString()
+
+        try {
+            foreach ($targetComputer in $script:RemoteTargets) {
+                $powershellInstance = [powershell]::Create()
+                $powershellInstance.RunspacePool = $runspacePool
+                [void]$powershellInstance.AddScript($workerScriptText)
+                [void]$powershellInstance.AddParameter("ComputerName", $targetComputer.Cn)
+                [void]$powershellInstance.AddParameter("TimeoutSeconds", $script:RemoteTimeoutSeconds)
+
+                $asyncHandle = $powershellInstance.BeginInvoke()
+
+                [void]$pendingJobs.Add([PSCustomObject]@{
+                    ComputerName = $targetComputer.Cn
+                    PowerShell   = $powershellInstance
+                    AsyncResult  = $asyncHandle
+                    StartedUtc   = [DateTime]::UtcNow
+                })
+            }
+
+            # Per-host wall-clock cap: headroom over the CIM operation
+            # timeout itself, since it must also cover connection setup and
+            # the DCOM fallback attempt.
+            $hardTimeoutSeconds = $script:RemoteTimeoutSeconds * 3
+            $overallDeadline    = (Get-Date).AddSeconds($hardTimeoutSeconds + 30)
+
+            while ($pendingJobs.Count -gt 0 -and (Get-Date) -lt $overallDeadline) {
+                for ($jobIndex = $pendingJobs.Count - 1; $jobIndex -ge 0; $jobIndex--) {
+                    $job = $pendingJobs[$jobIndex]
+
+                    $elapsedSeconds = ([DateTime]::UtcNow - $job.StartedUtc).TotalSeconds
+                    $isDone   = $job.AsyncResult.IsCompleted
+                    $timedOut = (-not $isDone) -and ($elapsedSeconds -gt $hardTimeoutSeconds)
+
+                    if (-not $isDone -and -not $timedOut) { continue }
+
+                    if ($timedOut) {
+                        [void]$script:CollectionErrors.Add([PSCustomObject]@{
+                            ComputerName = $job.ComputerName
+                            Section      = "Connection"
+                            Protocol     = "N/A"
+                            Message      = "Remote collection exceeded the $hardTimeoutSeconds second per-host timeout and was aborted."
+                        })
+                        $script:ServersFailed++
+                        try { $job.PowerShell.Stop() } catch { }
+                        try { $job.PowerShell.Dispose() } catch { }
+                        $pendingJobs.RemoveAt($jobIndex)
+                        continue
+                    }
+
+                    try {
+                        $hostResult = $job.PowerShell.EndInvoke($job.AsyncResult)
+
+                        if (-not $hostResult -or $hostResult.Count -eq 0) {
+                            [void]$script:CollectionErrors.Add([PSCustomObject]@{
+                                ComputerName = $job.ComputerName
+                                Section      = "Runspace"
+                                Protocol     = "N/A"
+                                Message      = "Worker returned no result."
+                            })
+                            $script:ServersFailed++
+                        } else {
+                            foreach ($resultItem in $hostResult) {
+                                if ($resultItem.Reached) { $script:ServersReached++ } else { $script:ServersFailed++ }
+
+                                if ($resultItem.OsInfo) {
+                                    Add-Member -InputObject $resultItem.OsInfo -MemberType NoteProperty -Name "ComputerName" -Value $resultItem.ComputerName -Force
+                                    [void]$script:RemoteOsInfo.Add($resultItem.OsInfo)
+                                }
+
+                                foreach ($taskItem in $resultItem.ScheduledTasks) {
+                                    Add-Member -InputObject $taskItem -MemberType NoteProperty -Name "ComputerName" -Value $resultItem.ComputerName -Force
+                                    [void]$script:RemoteScheduledTasks.Add($taskItem)
+                                }
+
+                                if ($resultItem.LocalAccounts) {
+                                    Add-Member -InputObject $resultItem.LocalAccounts -MemberType NoteProperty -Name "ComputerName" -Value $resultItem.ComputerName -Force
+                                    [void]$script:RemoteLocalAccounts.Add($resultItem.LocalAccounts)
+                                }
+
+                                foreach ($serviceItem in $resultItem.Services) {
+                                    Add-Member -InputObject $serviceItem -MemberType NoteProperty -Name "ComputerName" -Value $resultItem.ComputerName -Force
+                                    [void]$script:RemoteServices.Add($serviceItem)
+                                }
+
+                                foreach ($errorItem in $resultItem.Errors) {
+                                    [void]$script:CollectionErrors.Add($errorItem)
+                                }
+                            }
+                        }
+                    } catch {
+                        [void]$script:CollectionErrors.Add([PSCustomObject]@{
+                            ComputerName = $job.ComputerName
+                            Section      = "Runspace"
+                            Protocol     = "N/A"
+                            Message      = $_.Exception.Message
+                        })
+                        $script:ServersFailed++
+                    } finally {
+                        try { $job.PowerShell.Dispose() } catch { }
+                        $pendingJobs.RemoveAt($jobIndex)
+                    }
+                }
+
+                if ($pendingJobs.Count -gt 0) { Start-Sleep -Milliseconds 500 }
+            }
+
+            # Anything still pending once the overall deadline passed (rare,
+            # given the per-job timeout above) is recorded and abandoned
+            # rather than left to block the rest of the script.
+            foreach ($job in $pendingJobs) {
+                [void]$script:CollectionErrors.Add([PSCustomObject]@{
+                    ComputerName = $job.ComputerName
+                    Section      = "Connection"
+                    Protocol     = "N/A"
+                    Message      = "Remote collection did not complete before the overall deadline."
+                })
+                $script:ServersFailed++
+                try { $job.PowerShell.Stop() } catch { }
+                try { $job.PowerShell.Dispose() } catch { }
+            }
+        } finally {
+            $runspacePool.Close()
+            $runspacePool.Dispose()
+        }
+
+        Write-Log -Message "Remote collection complete: $($script:ServersReached) reached, $($script:ServersFailed) failed, out of $($script:ServersTargeted) targeted" -Level OK
+    }
+}
