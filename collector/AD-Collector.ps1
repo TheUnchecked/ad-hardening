@@ -1159,40 +1159,44 @@ try {
         $exchangeContainers += ("CN=Microsoft Exchange,CN=Services," + $script:ConfigurationNamingContext)
     }
 
-    $combinedAces       = New-Object 'System.Collections.Generic.List[object]'
-    $combinedDelegation = @{}
+    # Every Exchange container's privileged ACEs are collected first; principals
+    # are then resolved and the delegation map is built ONCE over the combined
+    # set, rather than building and merging a separate map per container - one
+    # simpler pass with less surface area for a cross-container merge bug.
+    $combinedAces = New-Object 'System.Collections.Generic.List[object]'
 
     foreach ($containerPath in $exchangeContainers) {
-        # Isolated per container: a problem merging one container's results
-        # (e.g. a malformed delegation record) must not discard whatever
-        # the other Exchange containers already contributed.
         try {
-            $containerInfo = Get-ContainerAclDelegation -ContainerPath $containerPath -Label "Exchange container ACL ($containerPath)"
-            if (-not $containerInfo.Found) { continue }
+            if (-not [System.DirectoryServices.DirectoryEntry]::Exists("LDAP://$containerPath")) {
+                Write-Log -Message "Exchange container ACL ($containerPath): container not found, skipping." -Level WARN
+                continue
+            }
 
-            foreach ($ace in $containerInfo.PrivilegedAces) { $combinedAces.Add($ace) }
+            $entry = [ADSI]("LDAP://" + $containerPath)
+            $acl   = $entry.psbase.ObjectSecurity
 
-            foreach ($delegationKey in $containerInfo.DelegationPrincipals.Keys) {
-                $delegatedUser = $containerInfo.DelegationPrincipals[$delegationKey]
-                if ($combinedDelegation.ContainsKey($delegationKey)) {
-                    $existingSources = @()
-                    if ($combinedDelegation[$delegationKey].DelegationSource) {
-                        $existingSources = @($combinedDelegation[$delegationKey].DelegationSource -split "; ")
-                    }
-                    if ($existingSources -notcontains $delegatedUser.DelegationSource) {
-                        $combinedDelegation[$delegationKey].DelegationSource = "$($combinedDelegation[$delegationKey].DelegationSource); $($delegatedUser.DelegationSource)"
-                    }
-                } else {
-                    $combinedDelegation[$delegationKey] = $delegatedUser
-                }
+            foreach ($ace in (Get-PrivilegedAces -Acl $acl -ObjectDN $containerPath -EveryoneLike $script:EveryoneLikeTrustees)) {
+                $combinedAces.Add($ace)
             }
         } catch {
-            Write-Log -Message "Section 5b: failed to merge results for '$containerPath' [$($_.Exception.GetType().FullName) at line $($_.InvocationInfo.ScriptLineNumber)]: $($_.Exception.Message)" -Level WARN
+            Write-Log -Message "Exchange container ACL ($containerPath) failed [$($_.Exception.GetType().FullName) at line $($_.InvocationInfo.ScriptLineNumber)]: $($_.Exception.Message)" -Level WARN
         }
     }
 
-    $script:ExchangePrivilegedAces       = @($combinedAces)
-    $script:ExchangeDelegationPrincipals = $combinedDelegation
+    $script:ExchangePrivilegedAces = @($combinedAces)
+
+    $exchangePrincipals = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($ace in $script:ExchangePrivilegedAces) {
+        $exchangePrincipals.Add((Resolve-Principal -Trustee $ace.Trustee))
+    }
+
+    $script:ExchangeDelegationPrincipals = Resolve-DelegationUsersMap `
+        -Principals $exchangePrincipals `
+        -UserIndex $script:UsersByDn `
+        -UserBySam $script:UsersBySam `
+        -GroupToUsers $script:GroupMembersIndex `
+        -DirectLabel "Exchange container ACL (direct)" `
+        -GroupPrefix "Exchange container ACL"
 
     Write-Log -Message "Section 5b: $($script:ExchangePrivilegedAces.Count) privileged ACEs, $($script:ExchangeDelegationPrincipals.Count) users resolved via delegation across Exchange containers" -Level OK
 } catch {
@@ -1293,8 +1297,10 @@ try { $script:PrincipalSearcher.Dispose() } catch { }
 Show-StepProgress -Status "Collecting domain-wide configuration facts"
 Write-Log -Message "Collecting domain configuration facts: Recycle Bin, last backup, functional levels, quotas, tombstone lifetime" -Level INFO
 
-# msDS-Behavior-Version conversion table. Values 8/9 are reserved/unused by
-# Microsoft (Server 2016 is 7, the next assigned value is Server 2025 at 10).
+# msDS-Behavior-Version conversion table. Microsoft never introduced a new
+# domain/forest functional level for Server 2019 or 2022, so level 7 (first
+# assigned to Server 2016) still covers all three; values 8/9 are
+# reserved/unused, and the next assigned value is Server 2025 at 10.
 $script:FunctionalLevelMap = @{
     0  = "Windows 2000"
     1  = "Windows Server 2003 Interim"
@@ -1303,7 +1309,7 @@ $script:FunctionalLevelMap = @{
     4  = "Windows Server 2008 R2"
     5  = "Windows Server 2012"
     6  = "Windows Server 2012 R2"
-    7  = "Windows Server 2016"
+    7  = "Windows Server 2016/2019/2022"
     8  = "Reserved/unused"
     9  = "Reserved/unused"
     10 = "Windows Server 2025"
@@ -1381,18 +1387,27 @@ function Get-LastBackupDate {
             if ($metaValues) {
                 foreach ($metaXml in $metaValues) {
                     $metaText = [string]$metaXml
-                    if ($metaText -notmatch "<pszAttributeName>dSASignature</pszAttributeName>") { continue }
-                    if ($metaText -notmatch "<ftimeLastOriginatingChange>([^<]+)</ftimeLastOriginatingChange>") { continue }
+                    if ($metaText -notmatch "dSASignature") { continue }
 
+                    # Parsed as XML rather than matched with a regex: more
+                    # robust to attribute ordering/whitespace in the blob
+                    # the LDAP server generates for this constructed attribute.
                     try {
+                        $metaDoc = [xml]$metaText
+                        $attributeName = $metaDoc.DS_REPL_ATTR_META_DATA.pszAttributeName
+                        if ($attributeName -ne "dSASignature") { continue }
+
+                        $rawTime = $metaDoc.DS_REPL_ATTR_META_DATA.ftimeLastOriginatingChange
+                        if ([string]::IsNullOrWhiteSpace($rawTime)) { continue }
+
                         $parsedTime = [DateTime]::Parse(
-                            $Matches[1],
+                            $rawTime,
                             [System.Globalization.CultureInfo]::InvariantCulture,
                             [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
                         )
                         $changeTimes.Add($parsedTime)
                     } catch {
-                        # Unparseable timestamp for this NC; the other naming contexts are still tried.
+                        # Unparseable/malformed metadata blob for this NC; the other naming contexts are still tried.
                     }
                 }
             }
@@ -1899,6 +1914,7 @@ function Initialize-WellKnownSidFallbackMap {
 
 # Domain-relative well-known RIDs, applied below to both the current domain
 # SID and the forest root domain SID.
+# RIDs that exist as real accounts/groups in EVERY domain of the forest.
 $script:DomainRidNames = @{
     500 = "Administrator"
     501 = "Guest"
@@ -1909,12 +1925,19 @@ $script:DomainRidNames = @{
     515 = "Domain Computers"
     516 = "Domain Controllers"
     517 = "Cert Publishers"
-    518 = "Schema Admins"
-    519 = "Enterprise Admins"
     520 = "Group Policy Creator Owners"
     521 = "Read-only Domain Controllers"
     525 = "Protected Users"
     526 = "Key Admins"
+}
+
+# RIDs for universal groups that Windows creates ONLY in the forest root
+# domain - Schema/Enterprise Admins, Enterprise Key Admins and the
+# Enterprise RODC group are not per-domain, unlike the table above.
+$script:ForestRootOnlyRidNames = @{
+    498 = "Enterprise Read-only Domain Controllers"
+    518 = "Schema Admins"
+    519 = "Enterprise Admins"
     527 = "Enterprise Key Admins"
 }
 
@@ -1948,6 +1971,22 @@ try {
         }
         if ($script:ForestRootDomainSid -and $script:ForestRootDomainSid -ne $script:CurrentDomainSid) {
             $script:WellKnownSidMap["$($script:ForestRootDomainSid)-$($ridEntry.Key)"] = "$($script:ForestRootDomainNetBios)\$($ridEntry.Value)"
+        }
+    }
+
+    # Forest-root-only universal groups: registered solely under the forest
+    # root domain SID, falling back to the current domain SID when this
+    # domain IS the forest root (ForestRootDomainSid then equals it, or is
+    # unset if the root domain naming context could not be read).
+    $forestRootSidForUniversalGroups     = $script:ForestRootDomainSid
+    $forestRootNetBiosForUniversalGroups = $script:ForestRootDomainNetBios
+    if (-not $forestRootSidForUniversalGroups) {
+        $forestRootSidForUniversalGroups     = $script:CurrentDomainSid
+        $forestRootNetBiosForUniversalGroups = $script:CurrentDomainNetBios
+    }
+    if ($forestRootSidForUniversalGroups) {
+        foreach ($ridEntry in $script:ForestRootOnlyRidNames.GetEnumerator()) {
+            $script:WellKnownSidMap["$forestRootSidForUniversalGroups-$($ridEntry.Key)"] = "$forestRootNetBiosForUniversalGroups\$($ridEntry.Value)"
         }
     }
 
