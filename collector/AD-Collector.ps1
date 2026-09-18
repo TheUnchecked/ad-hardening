@@ -1159,28 +1159,35 @@ try {
         $exchangeContainers += ("CN=Microsoft Exchange,CN=Services," + $script:ConfigurationNamingContext)
     }
 
-    $combinedAces      = New-Object 'System.Collections.Generic.List[object]'
+    $combinedAces       = New-Object 'System.Collections.Generic.List[object]'
     $combinedDelegation = @{}
 
     foreach ($containerPath in $exchangeContainers) {
-        $containerInfo = Get-ContainerAclDelegation -ContainerPath $containerPath -Label "Exchange container ACL ($containerPath)"
-        if (-not $containerInfo.Found) { continue }
+        # Isolated per container: a problem merging one container's results
+        # (e.g. a malformed delegation record) must not discard whatever
+        # the other Exchange containers already contributed.
+        try {
+            $containerInfo = Get-ContainerAclDelegation -ContainerPath $containerPath -Label "Exchange container ACL ($containerPath)"
+            if (-not $containerInfo.Found) { continue }
 
-        foreach ($ace in $containerInfo.PrivilegedAces) { $combinedAces.Add($ace) }
+            foreach ($ace in $containerInfo.PrivilegedAces) { $combinedAces.Add($ace) }
 
-        foreach ($delegationKey in $containerInfo.DelegationPrincipals.Keys) {
-            $delegatedUser = $containerInfo.DelegationPrincipals[$delegationKey]
-            if ($combinedDelegation.ContainsKey($delegationKey)) {
-                $existingSources = @()
-                if ($combinedDelegation[$delegationKey].DelegationSource) {
-                    $existingSources = @($combinedDelegation[$delegationKey].DelegationSource -split "; ")
+            foreach ($delegationKey in $containerInfo.DelegationPrincipals.Keys) {
+                $delegatedUser = $containerInfo.DelegationPrincipals[$delegationKey]
+                if ($combinedDelegation.ContainsKey($delegationKey)) {
+                    $existingSources = @()
+                    if ($combinedDelegation[$delegationKey].DelegationSource) {
+                        $existingSources = @($combinedDelegation[$delegationKey].DelegationSource -split "; ")
+                    }
+                    if ($existingSources -notcontains $delegatedUser.DelegationSource) {
+                        $combinedDelegation[$delegationKey].DelegationSource = "$($combinedDelegation[$delegationKey].DelegationSource); $($delegatedUser.DelegationSource)"
+                    }
+                } else {
+                    $combinedDelegation[$delegationKey] = $delegatedUser
                 }
-                if ($existingSources -notcontains $delegatedUser.DelegationSource) {
-                    $combinedDelegation[$delegationKey].DelegationSource = "$($combinedDelegation[$delegationKey].DelegationSource); $($delegatedUser.DelegationSource)"
-                }
-            } else {
-                $combinedDelegation[$delegationKey] = $delegatedUser
             }
+        } catch {
+            Write-Log -Message "Section 5b: failed to merge results for '$containerPath' [$($_.Exception.GetType().FullName) at line $($_.InvocationInfo.ScriptLineNumber)]: $($_.Exception.Message)" -Level WARN
         }
     }
 
@@ -1189,7 +1196,7 @@ try {
 
     Write-Log -Message "Section 5b: $($script:ExchangePrivilegedAces.Count) privileged ACEs, $($script:ExchangeDelegationPrincipals.Count) users resolved via delegation across Exchange containers" -Level OK
 } catch {
-    Write-Log -Message "Section 5b failed: $($_.Exception.Message)" -Level ERROR
+    Write-Log -Message "Section 5b failed [$($_.Exception.GetType().FullName) at line $($_.InvocationInfo.ScriptLineNumber)]: $($_.Exception.Message)" -Level ERROR
 }
 
 ################################################################################
@@ -3427,7 +3434,7 @@ Write-Progress -Id 1 -Activity "ADCollector Collection" -Completed
 
 $script:Stopwatch.Stop()
 $elapsed          = $script:Stopwatch.Elapsed
-$elapsedFormatted = "{0:D2}:{1:D2}:{2:D2}" -f [Math]::Floor($elapsed.TotalHours), $elapsed.Minutes, $elapsed.Seconds
+$elapsedFormatted = "{0:D2}:{1:D2}:{2:D2}" -f [int][Math]::Floor($elapsed.TotalHours), $elapsed.Minutes, $elapsed.Seconds
 
 $archiveSha256 = "N/A"
 if ($archiveCreated -and (Test-Path -Path $archivePath)) {
