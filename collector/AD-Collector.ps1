@@ -1159,37 +1159,48 @@ try {
         $exchangeContainers += ("CN=Microsoft Exchange,CN=Services," + $script:ConfigurationNamingContext)
     }
 
-    $combinedAces      = New-Object 'System.Collections.Generic.List[object]'
-    $combinedDelegation = @{}
+    # Every Exchange container's privileged ACEs are collected first; principals
+    # are then resolved and the delegation map is built ONCE over the combined
+    # set, rather than building and merging a separate map per container - one
+    # simpler pass with less surface area for a cross-container merge bug.
+    $combinedAces = New-Object 'System.Collections.Generic.List[object]'
 
     foreach ($containerPath in $exchangeContainers) {
-        $containerInfo = Get-ContainerAclDelegation -ContainerPath $containerPath -Label "Exchange container ACL ($containerPath)"
-        if (-not $containerInfo.Found) { continue }
-
-        foreach ($ace in $containerInfo.PrivilegedAces) { $combinedAces.Add($ace) }
-
-        foreach ($delegationKey in $containerInfo.DelegationPrincipals.Keys) {
-            $delegatedUser = $containerInfo.DelegationPrincipals[$delegationKey]
-            if ($combinedDelegation.ContainsKey($delegationKey)) {
-                $existingSources = @()
-                if ($combinedDelegation[$delegationKey].DelegationSource) {
-                    $existingSources = @($combinedDelegation[$delegationKey].DelegationSource -split "; ")
-                }
-                if ($existingSources -notcontains $delegatedUser.DelegationSource) {
-                    $combinedDelegation[$delegationKey].DelegationSource = "$($combinedDelegation[$delegationKey].DelegationSource); $($delegatedUser.DelegationSource)"
-                }
-            } else {
-                $combinedDelegation[$delegationKey] = $delegatedUser
+        try {
+            if (-not [System.DirectoryServices.DirectoryEntry]::Exists("LDAP://$containerPath")) {
+                Write-Log -Message "Exchange container ACL ($containerPath): container not found, skipping." -Level WARN
+                continue
             }
+
+            $entry = [ADSI]("LDAP://" + $containerPath)
+            $acl   = $entry.psbase.ObjectSecurity
+
+            foreach ($ace in (Get-PrivilegedAces -Acl $acl -ObjectDN $containerPath -EveryoneLike $script:EveryoneLikeTrustees)) {
+                $combinedAces.Add($ace)
+            }
+        } catch {
+            Write-Log -Message "Exchange container ACL ($containerPath) failed [$($_.Exception.GetType().FullName) at line $($_.InvocationInfo.ScriptLineNumber)]: $($_.Exception.Message)" -Level WARN
         }
     }
 
-    $script:ExchangePrivilegedAces       = @($combinedAces)
-    $script:ExchangeDelegationPrincipals = $combinedDelegation
+    $script:ExchangePrivilegedAces = @($combinedAces)
+
+    $exchangePrincipals = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($ace in $script:ExchangePrivilegedAces) {
+        $exchangePrincipals.Add((Resolve-Principal -Trustee $ace.Trustee))
+    }
+
+    $script:ExchangeDelegationPrincipals = Resolve-DelegationUsersMap `
+        -Principals $exchangePrincipals `
+        -UserIndex $script:UsersByDn `
+        -UserBySam $script:UsersBySam `
+        -GroupToUsers $script:GroupMembersIndex `
+        -DirectLabel "Exchange container ACL (direct)" `
+        -GroupPrefix "Exchange container ACL"
 
     Write-Log -Message "Section 5b: $($script:ExchangePrivilegedAces.Count) privileged ACEs, $($script:ExchangeDelegationPrincipals.Count) users resolved via delegation across Exchange containers" -Level OK
 } catch {
-    Write-Log -Message "Section 5b failed: $($_.Exception.Message)" -Level ERROR
+    Write-Log -Message "Section 5b failed [$($_.Exception.GetType().FullName) at line $($_.InvocationInfo.ScriptLineNumber)]: $($_.Exception.Message)" -Level ERROR
 }
 
 ################################################################################
@@ -1286,8 +1297,10 @@ try { $script:PrincipalSearcher.Dispose() } catch { }
 Show-StepProgress -Status "Collecting domain-wide configuration facts"
 Write-Log -Message "Collecting domain configuration facts: Recycle Bin, last backup, functional levels, quotas, tombstone lifetime" -Level INFO
 
-# msDS-Behavior-Version conversion table. Values 8/9 are reserved/unused by
-# Microsoft (Server 2016 is 7, the next assigned value is Server 2025 at 10).
+# msDS-Behavior-Version conversion table. Microsoft never introduced a new
+# domain/forest functional level for Server 2019 or 2022, so level 7 (first
+# assigned to Server 2016) still covers all three; values 8/9 are
+# reserved/unused, and the next assigned value is Server 2025 at 10.
 $script:FunctionalLevelMap = @{
     0  = "Windows 2000"
     1  = "Windows Server 2003 Interim"
@@ -1296,7 +1309,7 @@ $script:FunctionalLevelMap = @{
     4  = "Windows Server 2008 R2"
     5  = "Windows Server 2012"
     6  = "Windows Server 2012 R2"
-    7  = "Windows Server 2016"
+    7  = "Windows Server 2016/2019/2022"
     8  = "Reserved/unused"
     9  = "Reserved/unused"
     10 = "Windows Server 2025"
@@ -1374,18 +1387,27 @@ function Get-LastBackupDate {
             if ($metaValues) {
                 foreach ($metaXml in $metaValues) {
                     $metaText = [string]$metaXml
-                    if ($metaText -notmatch "<pszAttributeName>dSASignature</pszAttributeName>") { continue }
-                    if ($metaText -notmatch "<ftimeLastOriginatingChange>([^<]+)</ftimeLastOriginatingChange>") { continue }
+                    if ($metaText -notmatch "dSASignature") { continue }
 
+                    # Parsed as XML rather than matched with a regex: more
+                    # robust to attribute ordering/whitespace in the blob
+                    # the LDAP server generates for this constructed attribute.
                     try {
+                        $metaDoc = [xml]$metaText
+                        $attributeName = $metaDoc.DS_REPL_ATTR_META_DATA.pszAttributeName
+                        if ($attributeName -ne "dSASignature") { continue }
+
+                        $rawTime = $metaDoc.DS_REPL_ATTR_META_DATA.ftimeLastOriginatingChange
+                        if ([string]::IsNullOrWhiteSpace($rawTime)) { continue }
+
                         $parsedTime = [DateTime]::Parse(
-                            $Matches[1],
+                            $rawTime,
                             [System.Globalization.CultureInfo]::InvariantCulture,
                             [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
                         )
                         $changeTimes.Add($parsedTime)
                     } catch {
-                        # Unparseable timestamp for this NC; the other naming contexts are still tried.
+                        # Unparseable/malformed metadata blob for this NC; the other naming contexts are still tried.
                     }
                 }
             }
@@ -1892,6 +1914,7 @@ function Initialize-WellKnownSidFallbackMap {
 
 # Domain-relative well-known RIDs, applied below to both the current domain
 # SID and the forest root domain SID.
+# RIDs that exist as real accounts/groups in EVERY domain of the forest.
 $script:DomainRidNames = @{
     500 = "Administrator"
     501 = "Guest"
@@ -1902,12 +1925,19 @@ $script:DomainRidNames = @{
     515 = "Domain Computers"
     516 = "Domain Controllers"
     517 = "Cert Publishers"
-    518 = "Schema Admins"
-    519 = "Enterprise Admins"
     520 = "Group Policy Creator Owners"
     521 = "Read-only Domain Controllers"
     525 = "Protected Users"
     526 = "Key Admins"
+}
+
+# RIDs for universal groups that Windows creates ONLY in the forest root
+# domain - Schema/Enterprise Admins, Enterprise Key Admins and the
+# Enterprise RODC group are not per-domain, unlike the table above.
+$script:ForestRootOnlyRidNames = @{
+    498 = "Enterprise Read-only Domain Controllers"
+    518 = "Schema Admins"
+    519 = "Enterprise Admins"
     527 = "Enterprise Key Admins"
 }
 
@@ -1941,6 +1971,22 @@ try {
         }
         if ($script:ForestRootDomainSid -and $script:ForestRootDomainSid -ne $script:CurrentDomainSid) {
             $script:WellKnownSidMap["$($script:ForestRootDomainSid)-$($ridEntry.Key)"] = "$($script:ForestRootDomainNetBios)\$($ridEntry.Value)"
+        }
+    }
+
+    # Forest-root-only universal groups: registered solely under the forest
+    # root domain SID, falling back to the current domain SID when this
+    # domain IS the forest root (ForestRootDomainSid then equals it, or is
+    # unset if the root domain naming context could not be read).
+    $forestRootSidForUniversalGroups     = $script:ForestRootDomainSid
+    $forestRootNetBiosForUniversalGroups = $script:ForestRootDomainNetBios
+    if (-not $forestRootSidForUniversalGroups) {
+        $forestRootSidForUniversalGroups     = $script:CurrentDomainSid
+        $forestRootNetBiosForUniversalGroups = $script:CurrentDomainNetBios
+    }
+    if ($forestRootSidForUniversalGroups) {
+        foreach ($ridEntry in $script:ForestRootOnlyRidNames.GetEnumerator()) {
+            $script:WellKnownSidMap["$forestRootSidForUniversalGroups-$($ridEntry.Key)"] = "$forestRootNetBiosForUniversalGroups\$($ridEntry.Value)"
         }
     }
 
@@ -3152,6 +3198,13 @@ function ConvertTo-HtmlEncoded {
 # Single-quoted here-string: the template is taken verbatim, so PowerShell
 # never tries to interpolate the JavaScript's own $-prefixed syntax. Content
 # is spliced in afterward via plain, literal .Replace() token substitution.
+#
+# Palette: the fixed, colorblind-validated categorical/status/neutral tokens
+# from the internal data-viz reference palette (light #fcfcfb / dark #1a1a19
+# surfaces). A single accent (categorical slot 1, blue) drives interactive
+# chrome; data badges (Category, booleans, State) stay neutral-gray rather
+# than color-coded, because this report never renders a risk judgement -
+# only the raw facts the collector gathered.
 $script:HtmlTemplate = @'
 <!DOCTYPE html>
 <html lang="en">
@@ -3159,63 +3212,321 @@ $script:HtmlTemplate = @'
 <meta charset="UTF-8">
 <title>__TITLE__</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: "Segoe UI", Arial, sans-serif; margin: 0; padding: 0; background:#f4f6f8; color:#1a1a1a; }
-  header { background:#14213d; color:#fff; padding:16px 24px; }
-  header h1 { margin:0 0 10px 0; font-size:20px; }
-  .meta-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:6px 16px; font-size:13px; }
-  .meta-grid div span.label { color:#9aa5c4; display:block; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
-  .warnings { background:#5c3a00; color:#ffe9b3; padding:10px 24px; font-size:13px; }
-  .warnings ul { margin:4px 0 0 18px; padding:0; }
-  nav#tab-nav { display:flex; flex-wrap:wrap; background:#1f2a48; padding:0 12px; position:sticky; top:0; z-index:10; }
-  nav#tab-nav button { background:transparent; border:none; color:#c9d2e8; padding:10px 14px; cursor:pointer; font-size:13px; }
-  nav#tab-nav button.active { background:#f4f6f8; color:#14213d; font-weight:bold; }
-  main { padding:16px 24px; }
-  .section { display:none; background:#fff; border:1px solid #d8dee6; border-radius:6px; padding:12px; margin-bottom:20px; }
-  .section h2 { margin-top:0; font-size:16px; }
-  .search-box { width:100%; max-width:360px; padding:6px 8px; margin-bottom:10px; border:1px solid #c3cad6; border-radius:4px; font-size:13px; box-sizing:border-box; }
-  .table-scroll { overflow:auto; max-height:70vh; }
-  table { border-collapse: collapse; width:100%; font-size:12px; }
-  th, td { border:1px solid #e2e6ec; padding:5px 8px; text-align:left; vertical-align:top; word-break:break-word; }
-  th { background:#eef1f6; cursor:pointer; position:sticky; top:0; user-select:none; }
-  th:hover { background:#e2e7f0; }
-  tr:nth-child(even) td { background:#fafbfc; }
-  footer { padding:16px 24px; font-size:11px; color:#8a93a3; }
+  :root {
+    color-scheme: light dark;
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --surface-2: #f3f2ee;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --ink-muted: #898781;
+    --border:    rgba(11,11,11,0.10);
+    --gridline:  #e1e0d9;
+    --accent:    #2a78d6;
+    --accent-ink:#ffffff;
+    --warn-bg:   #fdf2e2;
+    --warn-ink:  #6b4a12;
+    --warn-border: #eda100;
+    --shadow: 0 1px 2px rgba(11,11,11,0.06), 0 1px 1px rgba(11,11,11,0.04);
+  }
   @media (prefers-color-scheme: dark) {
-    body { background:#0f1420; color:#dfe4ee; }
-    .section { background:#161d2e; border-color:#2a3450; }
-    th { background:#1f2942; }
-    tr:nth-child(even) td { background:#131a29; }
-    td, th { border-color:#28324c; }
-    .search-box { background:#0f1420; color:#dfe4ee; border-color:#2a3450; }
+    :root:not([data-theme="light"]) {
+      --page:      #0d0d0d;
+      --surface:   #1a1a19;
+      --surface-2: #202020;
+      --ink:       #ffffff;
+      --ink-2:     #c3c2b7;
+      --ink-muted: #898781;
+      --border:    rgba(255,255,255,0.10);
+      --gridline:  #2c2c2a;
+      --accent:    #3987e5;
+      --accent-ink:#ffffff;
+      --warn-bg:   #2a2210;
+      --warn-ink:  #f0cf8a;
+      --warn-border: #c98500;
+      --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 1px 1px rgba(0,0,0,0.3);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+    margin: 0; padding: 0; background: var(--page); color: var(--ink);
+    font-size: 14px; line-height: 1.45;
+  }
+  .app { display: flex; min-height: 100vh; }
+
+  /* ---------- Sidebar ---------- */
+  .sidebar {
+    width: 260px; flex: 0 0 260px; background: var(--surface);
+    border-right: 1px solid var(--border); position: sticky; top: 0;
+    height: 100vh; overflow-y: auto; display: flex; flex-direction: column;
+  }
+  .sidebar-header { padding: 18px 18px 12px 18px; border-bottom: 1px solid var(--border); }
+  .sidebar-header .brand { font-size: 15px; font-weight: 600; color: var(--ink); }
+  .sidebar-header .sub { font-size: 11px; color: var(--ink-muted); margin-top: 3px; word-break: break-all; }
+  .nav-group-label { padding: 14px 18px 4px 18px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); }
+  nav.tabs { display: flex; flex-direction: column; padding: 0 8px 12px 8px; }
+  nav.tabs button {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: transparent; border: none; border-left: 3px solid transparent;
+    color: var(--ink-2); padding: 8px 10px; cursor: pointer; font-size: 13px;
+    text-align: left; border-radius: 6px; margin: 1px 0; font-family: inherit;
+  }
+  nav.tabs button:hover { background: var(--surface-2); color: var(--ink); }
+  nav.tabs button.active { background: var(--surface-2); color: var(--accent); border-left-color: var(--accent); font-weight: 600; }
+  nav.tabs button .count { font-size: 11px; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+  nav.tabs button.active .count { color: var(--accent); }
+
+  /* ---------- Main ---------- */
+  .main { flex: 1; min-width: 0; padding: 22px 28px 40px 28px; }
+  .view { display: none; }
+  .view.active { display: block; }
+  .view-header { margin-bottom: 16px; }
+  .view-header h1 { margin: 0 0 4px 0; font-size: 19px; }
+  .view-header .desc { font-size: 12px; color: var(--ink-muted); }
+
+  .warnings {
+    background: var(--warn-bg); color: var(--warn-ink); border: 1px solid var(--warn-border);
+    border-radius: 8px; padding: 10px 14px; font-size: 12px; margin-bottom: 18px;
+  }
+  .warnings strong { display: block; margin-bottom: 4px; }
+  .warnings ul { margin: 2px 0 0 18px; padding: 0; }
+
+  /* ---------- KPI tiles ---------- */
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .kpi-tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow); }
+  .kpi-tile .value { font-size: 26px; font-weight: 600; color: var(--accent); line-height: 1.1; }
+  .kpi-tile .label { font-size: 12px; color: var(--ink-2); margin-top: 5px; }
+
+  /* ---------- Fact panel ---------- */
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; margin-bottom: 22px; box-shadow: var(--shadow); }
+  .panel h2 { margin: 0 0 12px 0; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-muted); }
+  .fact-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px 20px; }
+  .fact-grid div span.label { display: block; font-size: 11px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 2px; }
+  .fact-grid div span.value { font-size: 13px; color: var(--ink); word-break: break-word; }
+  .fact-grid div span.value.mono { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+
+  /* ---------- Section (data table) view ---------- */
+  .section-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden; }
+  .section-toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .search-box {
+    flex: 0 1 340px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px;
+    font-size: 13px; background: var(--page); color: var(--ink); font-family: inherit;
+  }
+  .search-box:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row-count { font-size: 12px; color: var(--ink-muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .table-scroll { overflow: auto; max-height: 72vh; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  thead th {
+    position: sticky; top: 0; background: var(--surface-2); color: var(--ink-2);
+    text-align: left; font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  thead th:hover { color: var(--ink); }
+  thead th .sort-arrow { color: var(--accent); margin-left: 3px; }
+  tbody td {
+    padding: 7px 10px; border-bottom: 1px solid var(--gridline); vertical-align: top;
+    max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  tbody td.expand-cell { white-space: normal; overflow: visible; text-overflow: clip; }
+  tbody td.expand-cell.expanded { max-width: 660px; position: relative; z-index: 1; }
+  tbody td.mono { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 11.5px; }
+  tbody tr:hover td { background: var(--surface-2); }
+  tbody tr:nth-child(even) td { background: rgba(11,11,11,0.015); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) tbody tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
+  }
+  .empty-state { padding: 28px; text-align: center; color: var(--ink-muted); font-size: 13px; }
+
+  .badge {
+    display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px;
+    font-size: 11px; color: var(--ink-2); background: var(--page); white-space: nowrap;
+  }
+  details.cell-details summary {
+    cursor: pointer; color: var(--accent); font-size: 12px; list-style: none;
+    display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px;
+  }
+  details.cell-details[open] summary { white-space: normal; overflow: visible; text-overflow: clip; max-width: none; }
+  details.cell-details summary::-webkit-details-marker { display: none; }
+  details.cell-details summary::before { content: "\25B8  "; }
+  details.cell-details[open] summary::before { content: "\25BE  "; }
+  details.cell-details pre {
+    margin: 6px 0 0 0; white-space: pre-wrap; word-break: normal; overflow-wrap: break-word;
+    font-size: 11.5px; min-width: 280px; max-width: 640px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    background: var(--page); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+  }
+
+  footer { padding: 18px 28px; font-size: 11px; color: var(--ink-muted); }
+
+  @media (max-width: 760px) {
+    .app { flex-direction: column; }
+    .sidebar { width: 100%; flex: none; height: auto; position: relative; border-right: none; border-bottom: 1px solid var(--border); }
+    nav.tabs { flex-direction: row; flex-wrap: wrap; }
   }
 </style>
 </head>
 <body>
-<header>
-  <h1>__TITLE__</h1>
-  <div class="meta-grid">
-__META_ITEMS__
-  </div>
-</header>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="brand">__TITLE__</div>
+      <div class="sub">__GENERATED_LINE__</div>
+    </div>
+    <div class="nav-group-label">Overview</div>
+    <nav class="tabs" id="overview-nav"></nav>
+    <div class="nav-group-label">Collected data</div>
+    <nav class="tabs" id="tab-nav"></nav>
+  </aside>
+  <main class="main" id="main-root">
 __WARNINGS_BLOCK__
-<nav id="tab-nav"></nav>
-<main id="sections-root"></main>
-<footer>Generated offline by ADCollector. No external resources are loaded by this page.</footer>
+  </main>
+</div>
 <script id="collection-data" type="application/json">__DATA_JSON__</script>
 <script>
 (function () {
   "use strict";
   var raw = document.getElementById("collection-data").textContent;
   var collection = JSON.parse(raw);
-  var sectionsRoot = document.getElementById("sections-root");
+  var mainRoot = document.getElementById("main-root");
+  var overviewNav = document.getElementById("overview-nav");
   var tabNav = document.getElementById("tab-nav");
   var sortState = {};
 
-  function renderValue(val) {
+  var sectionLabels = {
+    monitoredGroups: "Monitored privileged groups",
+    unifiedPrivilegedUsers: "Privileged users (unified)",
+    rootPrivilegedAces: "Domain root ACL — privileged ACEs",
+    rootDelegationPrincipals: "Domain root ACL — delegated users",
+    dcOuPrivilegedAces: "Domain Controllers OU ACL — privileged ACEs",
+    dcDelegationPrincipals: "Domain Controllers OU ACL — delegated users",
+    exchangePrivilegedAces: "Exchange containers ACL — privileged ACEs",
+    exchangeDelegationPrincipals: "Exchange containers ACL — delegated users",
+    computers: "Domain computers",
+    gpos: "Group Policy Objects",
+    userRightsAssignments: "User Rights Assignment (GptTmpl.inf)",
+    tierGpoCoverage: "Tier GPO coverage & conflicts",
+    kerberoastable: "Kerberoastable accounts",
+    asrepRoastable: "AS-REP roastable accounts",
+    msolAccounts: "MSOL_ service accounts",
+    krbtgt: "krbtgt account",
+    guestAccount: "Built-in Guest account",
+    laps: "LAPS deployment state",
+    remoteOsInfo: "Remote servers — OS info",
+    remoteScheduledTasks: "Remote servers — scheduled tasks",
+    remoteLocalAccounts: "Remote servers — local accounts & groups",
+    remoteServices: "Remote servers — services",
+    collectionErrors: "Collection errors"
+  };
+
+  var kpiKeys = [
+    "unifiedPrivilegedUsers", "monitoredGroups", "computers", "gpos",
+    "userRightsAssignments", "kerberoastable", "asrepRoastable", "msolAccounts",
+    "remoteScheduledTasks", "remoteServices", "collectionErrors"
+  ];
+
+  var factPairs = [
+    ["Domain (Base DN)", collection.meta.baseDN, true],
+    ["Domain SID", collection.meta.domainSid, true],
+    ["Domain functional level", collection.meta.domainFunctionalLevel, false],
+    ["Forest functional level", collection.meta.forestFunctionalLevel, false],
+    ["Recycle Bin", collection.meta.recycleBinState, false],
+    ["Last backup", collection.meta.lastBackupDisplay, false],
+    ["Machine account quota", collection.meta.machineAccountQuota, false],
+    ["Tombstone lifetime (days)", collection.meta.tombstoneLifetimeDays, false],
+    ["Remote servers reached", collection.meta.serversReached + " / " + collection.meta.serversTargeted + " targeted (" + collection.meta.serversFailed + " failed)", false],
+    ["PowerShell version", collection.meta.powerShellVersion, false],
+    ["Tool version", collection.meta.version, false],
+    ["Collector SHA-256", collection.meta.scriptSha256, true]
+  ];
+
+  function labelFor(key) { return sectionLabels[key] || key; }
+
+  function formatValue(val) {
     if (val === null || val === undefined) { return ""; }
     if (typeof val === "object") { return JSON.stringify(val); }
     return String(val);
+  }
+
+  function isMonoColumn(colName) {
+    return /(sid|dn|distinguishedname|path|hash|guid)$/i.test(colName);
+  }
+
+  function isBadgeColumn(colName) {
+    return /^(category|state|type|relationship|protocol|section)$/i.test(colName);
+  }
+
+  function attachExpandToggle(td, details) {
+    // Table auto-layout sizes a column from its COLLAPSED content, since
+    // pre-wrap/break-word text is technically free to shrink to nothing;
+    // widening the cell only while its <details> is open lets the expanded
+    // content actually use the room it needs without permanently widening
+    // (and pushing sideways) every other row in the column.
+    details.addEventListener("toggle", function () {
+      td.classList.toggle("expanded", details.open);
+    });
+  }
+
+  function buildCell(colName, value) {
+    var td = document.createElement("td");
+
+    if (value !== null && typeof value === "object") {
+      td.classList.add("expand-cell");
+      var details = document.createElement("details");
+      details.className = "cell-details";
+      var summary = document.createElement("summary");
+      var itemCount = Array.isArray(value) ? value.length : Object.keys(value).length;
+      summary.textContent = Array.isArray(value)
+        ? (itemCount + (itemCount === 1 ? " item" : " items"))
+        : "Show details";
+      var pre = document.createElement("pre");
+      var isFlatArray = Array.isArray(value) && value.every(function (v) { return v === null || typeof v !== "object"; });
+      pre.textContent = isFlatArray ? value.map(formatValue).join("\n") : JSON.stringify(value, null, 2);
+      details.appendChild(summary);
+      details.appendChild(pre);
+      td.appendChild(details);
+      attachExpandToggle(td, details);
+      return td;
+    }
+
+    var text = formatValue(value);
+
+    if (typeof value === "boolean") {
+      var badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = text;
+      td.appendChild(badge);
+      return td;
+    }
+
+    if (isBadgeColumn(colName) && text) {
+      var badge2 = document.createElement("span");
+      badge2.className = "badge";
+      badge2.textContent = text;
+      td.appendChild(badge2);
+      return td;
+    }
+
+    if (text.length > 120) {
+      td.classList.add("expand-cell");
+      var details2 = document.createElement("details");
+      details2.className = "cell-details";
+      var summary2 = document.createElement("summary");
+      summary2.textContent = text.slice(0, 70) + "…";
+      var pre2 = document.createElement("pre");
+      pre2.textContent = text;
+      details2.appendChild(summary2);
+      details2.appendChild(pre2);
+      td.appendChild(details2);
+      attachExpandToggle(td, details2);
+      return td;
+    }
+
+    if (isMonoColumn(colName)) { td.classList.add("mono"); }
+    td.textContent = text;
+    td.title = text;
+    return td;
   }
 
   function sortTable(table, colIndex) {
@@ -3226,9 +3537,18 @@ __WARNINGS_BLOCK__
     sortState = {};
     sortState[stateKey] = ascending;
 
+    Array.prototype.forEach.call(table.querySelectorAll("thead .sort-arrow"), function (el) { el.remove(); });
+    var activeTh = table.querySelectorAll("thead th")[colIndex];
+    if (activeTh) {
+      var arrow = document.createElement("span");
+      arrow.className = "sort-arrow";
+      arrow.textContent = ascending ? "▲" : "▼";
+      activeTh.appendChild(arrow);
+    }
+
     rows.sort(function (a, b) {
-      var av = a.cells[colIndex] ? a.cells[colIndex].textContent : "";
-      var bv = b.cells[colIndex] ? b.cells[colIndex].textContent : "";
+      var av = a.cells[colIndex] ? a.cells[colIndex].getAttribute("data-sort") || a.cells[colIndex].textContent : "";
+      var bv = b.cells[colIndex] ? b.cells[colIndex].getAttribute("data-sort") || b.cells[colIndex].textContent : "";
       var an = parseFloat(av);
       var bn = parseFloat(bv);
       var cmp;
@@ -3243,126 +3563,207 @@ __WARNINGS_BLOCK__
     rows.forEach(function (row) { tbody.appendChild(row); });
   }
 
-  function buildSection(sectionKey, sectionObj, index) {
-    var wrapper = document.createElement("div");
-    wrapper.className = "section";
-    wrapper.id = "section-" + sectionKey;
-    if (index === 0) { wrapper.style.display = "block"; }
+  function buildSectionView(sectionKey, sectionObj, index) {
+    var view = document.createElement("div");
+    view.className = "view";
+    view.id = "view-section-" + sectionKey;
 
-    var heading = document.createElement("h2");
-    heading.textContent = sectionKey + " (" + sectionObj.meta.count + ")";
-    wrapper.appendChild(heading);
+    var header = document.createElement("div");
+    header.className = "view-header";
+    var h1 = document.createElement("h1");
+    h1.textContent = labelFor(sectionKey);
+    header.appendChild(h1);
+    view.appendChild(header);
 
+    var card = document.createElement("div");
+    card.className = "section-card";
+
+    var toolbar = document.createElement("div");
+    toolbar.className = "section-toolbar";
     var searchBox = document.createElement("input");
     searchBox.type = "text";
     searchBox.className = "search-box";
-    searchBox.placeholder = "Filter " + sectionKey + "...";
-    wrapper.appendChild(searchBox);
-
-    var scrollWrap = document.createElement("div");
-    scrollWrap.className = "table-scroll";
-
-    var table = document.createElement("table");
-    table.id = "table-" + sectionKey;
-    var thead = document.createElement("thead");
-    var tbody = document.createElement("tbody");
+    searchBox.placeholder = "Filter this table…";
+    var rowCount = document.createElement("span");
+    rowCount.className = "row-count";
+    toolbar.appendChild(searchBox);
+    toolbar.appendChild(rowCount);
+    card.appendChild(toolbar);
 
     var items = sectionObj.data || [];
-    var columns = [];
-    if (items.length > 0 && typeof items[0] === "object" && items[0] !== null) {
-      for (var key in items[0]) {
-        if (Object.prototype.hasOwnProperty.call(items[0], key)) { columns.push(key); }
+
+    if (items.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = "No data collected for this section.";
+      card.appendChild(empty);
+      rowCount.textContent = "0 rows";
+    } else {
+      var columns = [];
+      if (typeof items[0] === "object" && items[0] !== null) {
+        for (var key in items[0]) {
+          if (Object.prototype.hasOwnProperty.call(items[0], key)) { columns.push(key); }
+        }
+      } else {
+        columns = ["value"];
       }
+
+      var scrollWrap = document.createElement("div");
+      scrollWrap.className = "table-scroll";
+
+      var table = document.createElement("table");
+      table.id = "table-" + sectionKey;
+      var thead = document.createElement("thead");
+      var tbody = document.createElement("tbody");
+
+      var headerRow = document.createElement("tr");
+      columns.forEach(function (col, colIndex) {
+        var th = document.createElement("th");
+        th.textContent = col;
+        th.addEventListener("click", function () { sortTable(table, colIndex); });
+        headerRow.appendChild(th);
+      });
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+
+      items.forEach(function (item) {
+        var tr = document.createElement("tr");
+        columns.forEach(function (col) {
+          var value = (typeof item === "object" && item !== null) ? item[col] : item;
+          tr.appendChild(buildCell(col, value));
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      scrollWrap.appendChild(table);
+      card.appendChild(scrollWrap);
+
+      rowCount.textContent = items.length + (items.length === 1 ? " row" : " rows");
+
+      searchBox.addEventListener("input", function () {
+        var filterText = searchBox.value.toLowerCase();
+        var visibleCount = 0;
+        Array.prototype.forEach.call(tbody.rows, function (row) {
+          var match = row.textContent.toLowerCase().indexOf(filterText) !== -1;
+          row.style.display = match ? "" : "none";
+          if (match) { visibleCount++; }
+        });
+        rowCount.textContent = visibleCount + " / " + items.length + " rows";
+      });
     }
 
-    var headerRow = document.createElement("tr");
-    columns.forEach(function (col, colIndex) {
-      var th = document.createElement("th");
-      th.textContent = col;
-      th.addEventListener("click", function () { sortTable(table, colIndex); });
-      headerRow.appendChild(th);
-    });
-    thead.appendChild(headerRow);
-    table.appendChild(thead);
-
-    items.forEach(function (item) {
-      var tr = document.createElement("tr");
-      columns.forEach(function (col) {
-        var td = document.createElement("td");
-        td.textContent = renderValue(item[col]);
-        tr.appendChild(td);
-      });
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    scrollWrap.appendChild(table);
-    wrapper.appendChild(scrollWrap);
-
-    searchBox.addEventListener("input", function () {
-      var filterText = searchBox.value.toLowerCase();
-      Array.prototype.forEach.call(tbody.rows, function (row) {
-        var rowText = row.textContent.toLowerCase();
-        row.style.display = rowText.indexOf(filterText) === -1 ? "none" : "";
-      });
-    });
-
-    sectionsRoot.appendChild(wrapper);
+    view.appendChild(card);
+    mainRoot.appendChild(view);
   }
 
-  function showSection(key, button) {
-    Array.prototype.forEach.call(document.querySelectorAll(".section"), function (el) { el.style.display = "none"; });
-    Array.prototype.forEach.call(document.querySelectorAll(".tab-button"), function (el) { el.classList.remove("active"); });
-    var target = document.getElementById("section-" + key);
-    if (target) { target.style.display = "block"; }
+  function buildOverviewView() {
+    var view = document.createElement("div");
+    view.className = "view active";
+    view.id = "view-overview";
+
+    var header = document.createElement("div");
+    header.className = "view-header";
+    var h1 = document.createElement("h1");
+    h1.textContent = "Overview";
+    var desc = document.createElement("div");
+    desc.className = "desc";
+    desc.textContent = "Raw counts from this collection run. No score, threshold or risk judgement is computed here — see the sections in the sidebar for the underlying data.";
+    header.appendChild(h1);
+    header.appendChild(desc);
+    view.appendChild(header);
+
+    var kpiGrid = document.createElement("div");
+    kpiGrid.className = "kpi-grid";
+    kpiKeys.forEach(function (key) {
+      var section = collection.data[key];
+      if (!section) { return; }
+      var tile = document.createElement("div");
+      tile.className = "kpi-tile";
+      var value = document.createElement("div");
+      value.className = "value";
+      value.textContent = section.meta.count;
+      var label = document.createElement("div");
+      label.className = "label";
+      label.textContent = labelFor(key);
+      tile.appendChild(value);
+      tile.appendChild(label);
+      kpiGrid.appendChild(tile);
+    });
+    view.appendChild(kpiGrid);
+
+    var panel = document.createElement("div");
+    panel.className = "panel";
+    var panelTitle = document.createElement("h2");
+    panelTitle.textContent = "Domain facts";
+    panel.appendChild(panelTitle);
+    var factGrid = document.createElement("div");
+    factGrid.className = "fact-grid";
+    factPairs.forEach(function (pair) {
+      var row = document.createElement("div");
+      var label = document.createElement("span");
+      label.className = "label";
+      label.textContent = pair[0];
+      var value = document.createElement("span");
+      value.className = "value" + (pair[2] ? " mono" : "");
+      value.textContent = formatValue(pair[1]);
+      row.appendChild(label);
+      row.appendChild(value);
+      factGrid.appendChild(row);
+    });
+    panel.appendChild(factGrid);
+    view.appendChild(panel);
+
+    mainRoot.appendChild(view);
+  }
+
+  function showView(viewId, button, groupButtons) {
+    Array.prototype.forEach.call(document.querySelectorAll(".view"), function (el) { el.classList.remove("active"); });
+    Array.prototype.forEach.call(document.querySelectorAll("nav.tabs button"), function (el) { el.classList.remove("active"); });
+    var target = document.getElementById(viewId);
+    if (target) { target.classList.add("active"); }
     if (button) { button.classList.add("active"); }
   }
 
+  // Overview nav entry
+  buildOverviewView();
+  var overviewBtn = document.createElement("button");
+  overviewBtn.textContent = "Overview";
+  overviewBtn.className = "active";
+  overviewBtn.addEventListener("click", function () { showView("view-overview", overviewBtn); });
+  overviewNav.appendChild(overviewBtn);
+
+  // One nav entry + view per collected section, in the order the collector emitted them
   var sectionKeys = [];
   for (var sectionKey in collection.data) {
     if (Object.prototype.hasOwnProperty.call(collection.data, sectionKey)) { sectionKeys.push(sectionKey); }
   }
 
-  sectionKeys.forEach(function (sectionKey, index) {
-    buildSection(sectionKey, collection.data[sectionKey], index);
+  sectionKeys.forEach(function (key) {
+    buildSectionView(key, collection.data[key]);
 
     var btn = document.createElement("button");
-    btn.className = "tab-button" + (index === 0 ? " active" : "");
-    btn.textContent = sectionKey;
-    btn.addEventListener("click", function () { showSection(sectionKey, btn); });
+    var labelSpan = document.createElement("span");
+    labelSpan.textContent = labelFor(key);
+    var countSpan = document.createElement("span");
+    countSpan.className = "count";
+    countSpan.textContent = collection.data[key].meta.count;
+    btn.appendChild(labelSpan);
+    btn.appendChild(countSpan);
+    btn.addEventListener("click", function () { showView("view-section-" + key, btn); });
     tabNav.appendChild(btn);
   });
 })();
 </script>
+<footer>Generated offline by ADCollector. No external resources are loaded by this page.</footer>
 </body>
 </html>
 '@
 
 try {
     $reportMeta  = $script:FinalCollection.meta
-    $reportTitle = "ADCollector Report - $($reportMeta.baseDN)"
+    $reportTitle = "ADCollector"
 
-    $metaPairs = [ordered]@{
-        "Domain (Base DN)"                = $reportMeta.baseDN
-        "Domain SID"                      = $reportMeta.domainSid
-        "Domain functional level"         = $reportMeta.domainFunctionalLevel
-        "Forest functional level"         = $reportMeta.forestFunctionalLevel
-        "Generated (UTC)"                 = $reportMeta.generatedUtc
-        "Tool version"                    = $reportMeta.version
-        "PowerShell version"              = $reportMeta.powerShellVersion
-        "Collector SHA-256"               = $reportMeta.scriptSha256
-        "Recycle Bin"                     = $reportMeta.recycleBinState
-        "Last backup"                     = $reportMeta.lastBackupDisplay
-        "Machine account quota"           = $reportMeta.machineAccountQuota
-        "Tombstone lifetime (days)"       = $reportMeta.tombstoneLifetimeDays
-        "Servers targeted/reached/failed" = "$($reportMeta.serversTargeted) / $($reportMeta.serversReached) / $($reportMeta.serversFailed)"
-    }
-
-    $metaItemsHtml = ""
-    foreach ($pairKey in $metaPairs.Keys) {
-        $encodedLabel = ConvertTo-HtmlEncoded -Text $pairKey
-        $encodedValue = ConvertTo-HtmlEncoded -Text ([string]$metaPairs[$pairKey])
-        $metaItemsHtml += "    <div><span class=""label"">$encodedLabel</span>$encodedValue</div>`n"
-    }
+    $generatedLineHtml = "Generated $(ConvertTo-HtmlEncoded -Text $reportMeta.generatedUtc) &middot; $(ConvertTo-HtmlEncoded -Text $reportMeta.baseDN)"
 
     $warningsBlockHtml = ""
     if ($reportMeta.warnings -and $reportMeta.warnings.Count -gt 0) {
@@ -3380,7 +3781,7 @@ try {
     $dataJsonForHtml = $script:CollectionJsonText -replace '</', '<\/'
 
     $finalHtml = $script:HtmlTemplate.Replace("__TITLE__", (ConvertTo-HtmlEncoded -Text $reportTitle))
-    $finalHtml = $finalHtml.Replace("__META_ITEMS__", $metaItemsHtml)
+    $finalHtml = $finalHtml.Replace("__GENERATED_LINE__", $generatedLineHtml)
     $finalHtml = $finalHtml.Replace("__WARNINGS_BLOCK__", $warningsBlockHtml)
     $finalHtml = $finalHtml.Replace("__DATA_JSON__", $dataJsonForHtml)
 
@@ -3427,7 +3828,7 @@ Write-Progress -Id 1 -Activity "ADCollector Collection" -Completed
 
 $script:Stopwatch.Stop()
 $elapsed          = $script:Stopwatch.Elapsed
-$elapsedFormatted = "{0:D2}:{1:D2}:{2:D2}" -f [Math]::Floor($elapsed.TotalHours), $elapsed.Minutes, $elapsed.Seconds
+$elapsedFormatted = "{0:D2}:{1:D2}:{2:D2}" -f [int][Math]::Floor($elapsed.TotalHours), $elapsed.Minutes, $elapsed.Seconds
 
 $archiveSha256 = "N/A"
 if ($archiveCreated -and (Test-Path -Path $archivePath)) {
